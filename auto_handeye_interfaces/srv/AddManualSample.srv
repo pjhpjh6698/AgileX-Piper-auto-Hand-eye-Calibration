@@ -1,0 +1,6 @@
+# Capture the current (base_T_gripper, camera_T_target) pair as a calibration sample.
+# Used in manual mode (auto_move=false) from the GUI "Add sample" button or CLI.
+---
+bool success
+string message
+int32 sample_count      # total accepted samples after this call

@@ -1,0 +1,83 @@
+# Calibration poses for automatic Eye-in-Hand data collection.
+#
+# ############################  SAFETY WARNING  ############################
+# These are PLACEHOLDER poses. They are NOT verified against your physical
+# robot's reach, mounting, or surroundings. DO NOT run with dry_run:=false
+# until you have:
+#   1. Confirmed each pose is reachable and collision-free (mock + RViz),
+#   2. Confirmed the ArUco target is visible from every pose,
+#   3. Reduced speed and stood by the emergency stop.
+# #########################################################################
+#
+# Representation: Cartesian base_T_gripper (meters, radians, fixed-axis XYZ
+# euler for readability only -- converted to quaternion internally). This is
+# the format the Piper /pos_cmd (moveL) driver accepts.
+#
+# Good pose set properties (see README section 6):
+#   * marker visible in all poses
+#   * rotation about >= 2 different axes, not orientation-only-around-one-axis
+#   * some translation variety
+#   * avoid wrist flips and singularities
+/**:
+  ros__parameters:
+    poses:
+      - name: home_center
+        position: [0.35, 0.00, 0.35]
+        rpy: [-3.14, 0.0, 0.0]
+        speed: 0.15
+        settle_time: 1.0
+      - name: left_tilt
+        position: [0.33, 0.10, 0.35]
+        rpy: [-3.14, 0.20, 0.0]
+        speed: 0.15
+        settle_time: 1.0
+      - name: right_tilt
+        position: [0.33, -0.10, 0.35]
+        rpy: [-3.14, -0.20, 0.0]
+        speed: 0.15
+        settle_time: 1.0
+      - name: up_pitch
+        position: [0.38, 0.00, 0.40]
+        rpy: [-2.95, 0.0, 0.15]
+        speed: 0.15
+        settle_time: 1.0
+      - name: down_pitch
+        position: [0.32, 0.00, 0.30]
+        rpy: [3.05, 0.0, -0.15]
+        speed: 0.15
+        settle_time: 1.0
+      - name: yaw_left
+        position: [0.35, 0.08, 0.36]
+        rpy: [-3.14, 0.10, 0.25]
+        speed: 0.15
+        settle_time: 1.0
+      - name: yaw_right
+        position: [0.35, -0.08, 0.36]
+        rpy: [-3.14, -0.10, -0.25]
+        speed: 0.15
+        settle_time: 1.0
+      - name: far_center
+        position: [0.42, 0.00, 0.38]
+        rpy: [-3.10, 0.05, 0.05]
+        speed: 0.15
+        settle_time: 1.0
+      - name: near_left
+        position: [0.30, 0.12, 0.33]
+        rpy: [-3.14, 0.18, 0.20]
+        speed: 0.15
+        settle_time: 1.0
+      - name: near_right
+        position: [0.30, -0.12, 0.33]
+        rpy: [-3.14, -0.18, -0.20]
+        speed: 0.15
+        settle_time: 1.0
+      - name: high_left
+        position: [0.37, 0.10, 0.42]
+        rpy: [-2.98, 0.15, 0.18]
+        speed: 0.15
+        settle_time: 1.0
+      - name: high_right
+        position: [0.37, -0.10, 0.42]
+        rpy: [-2.98, -0.15, -0.18]
+        speed: 0.15
+        settle_time: 1.0

@@ -1,0 +1,4 @@
+# Clear all collected samples and reset the state machine to IDLE.
+---
+bool success
+string message

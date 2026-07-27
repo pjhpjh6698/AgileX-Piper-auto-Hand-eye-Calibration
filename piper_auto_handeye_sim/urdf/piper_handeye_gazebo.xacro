@@ -1,0 +1,231 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Piper (with gripper) + wrist-mounted RealSense-like camera, for Gazebo Classic.
+
+  Why this file does NOT include piper_description_gazebo.xacro
+  ============================================================
+  That upstream file clamps EVERY ros2_control command_interface to [-1, 1] rad,
+  which contradicts the robot's own URDF limits, e.g.
+      joint2 real range [0.000, 3.140]   but commandable only [-1, 1]
+      joint3 real range [-2.967, 0.000]  but commandable only [-1, 1]
+  Roughly half the workspace is unreachable under those limits, including the
+  forward-and-down configurations the calibration poses need. So we build on the
+  pure-kinematics URDF and declare correct limits here.
+
+  Ground truth
+  ============
+  The camera mount below IS the value the calibration must recover:
+      gripper_T_camera == link6 -> camera_color_optical_frame
+  Never hard-code it elsewhere: ground_truth_reporter_node reads it from tf, so
+  it stays correct even if you retune the mount.
+
+  Camera aim
+  ==========
+  The gripper mounts on link6 with an identity transform and its fingers extend
+  along +Z (joint7/joint8 sit at z=+0.1358). So +Z IS the tool approach axis,
+  and a realistic wrist camera looks along it, beside the gripper.
+  cam_pitch is therefore near -pi/2, which rotates camera_link's +X (the Gazebo
+  viewing direction) onto link6's +Z. The small extra offsets in pitch/yaw keep
+  the ground truth non-trivial so a sign or ordering error cannot pass unnoticed.
+-->
+<robot name="piper" xmlns:xacro="http://ros.org/wiki/xacro">
+
+  <!-- pure kinematics + visuals, gripper included; no gazebo/ros2_control tags -->
+  <xacro:include filename="$(find piper_description)/urdf/piper_description.urdf"/>
+
+  <!-- bolt the robot to the world so base_link never moves -->
+  <link name="world"/>
+  <joint name="fixed_base_joint" type="fixed">
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+    <parent link="world"/>
+    <child link="base_link"/>
+  </joint>
+
+  <!-- ==================================================================== -->
+  <!--  CAMERA MOUNT  =  the ground truth to be recovered                    -->
+  <!-- ==================================================================== -->
+  <!-- Sits ON TOP of the wrist, looking along the tool axis: the usual
+       eye-in-hand arrangement.
+
+       Offset along link6's X, not Y: the fingers travel along Y (joint7's axis
+       maps to link6 -Y), so a Y offset hangs the camera out in the fingers'
+       path instead of on the wrist. The sign matters too: +X is the UNDER
+       side (the camera ends up slung beneath the gripper), -X is the upper
+       face. Z displaces it forward along the tool axis, onto the wrist body.
+
+       The gripper WILL intrude into the bottom of the frame from here. That is
+       correct and expected for a real wrist camera; the mount should not be
+       distorted to dodge it. ArUco detection is local to the marker, so partial
+       occlusion of the frame edge costs nothing as long as the marker itself is
+       clear, which the pose generator checks explicitly. -->
+  <xacro:property name="cam_x"     value="-0.042"/>
+  <xacro:property name="cam_y"     value="0.0"/>
+  <xacro:property name="cam_z"     value="0.045"/>
+  <xacro:property name="cam_roll"  value="0.0"/>
+  <xacro:property name="cam_pitch" value="-1.4708"/>   <!-- -pi/2 + 0.10 -->
+  <xacro:property name="cam_yaw"   value="0.09"/>
+
+  <xacro:property name="cam_width"  value="640"/>
+  <xacro:property name="cam_height" value="480"/>
+  <xacro:property name="cam_hfov"   value="1.211"/>    <!-- 69.4 deg, D435 colour -->
+  <xacro:property name="cam_rate"   value="30.0"/>
+
+  <!-- Real D435 mesh from realsense2_description.
+       The rpy="pi/2 0 pi/2" is that package's own convention for orienting this
+       mesh against a ROS camera_link (x forward, y left, z up); the small x/y
+       offsets put the mesh body behind the optical origin, where it physically
+       sits. This block is COSMETIC ONLY: the ground truth is set by
+       camera_mount_joint and camera_optical_joint below, so restyling the
+       visual can never change the value the calibration has to recover. -->
+  <link name="camera_link">
+    <visual>
+      <origin xyz="-0.0149 -0.0175 0" rpy="${pi/2} 0 ${pi/2}"/>
+      <geometry>
+        <mesh filename="package://realsense2_description/meshes/d435.dae"/>
+      </geometry>
+    </visual>
+    <collision>
+      <origin xyz="-0.0149 0 0" rpy="0 0 0"/>
+      <geometry><box size="0.025 0.090 0.025"/></geometry>
+    </collision>
+    <inertial>
+      <mass value="0.072"/>
+      <inertia ixx="1e-5" ixy="0" ixz="0" iyy="1e-5" iyz="0" izz="1e-5"/>
+    </inertial>
+  </link>
+
+  <!-- simple bracket so the camera does not appear to float -->
+  <link name="camera_bracket_link">
+    <visual>
+      <geometry><box size="0.014 0.030 0.030"/></geometry>
+      <material name="bracket"><color rgba="0.35 0.35 0.38 1.0"/></material>
+    </visual>
+    <inertial>
+      <mass value="0.02"/>
+      <inertia ixx="1e-6" ixy="0" ixz="0" iyy="1e-6" iyz="0" izz="1e-6"/>
+    </inertial>
+  </link>
+  <joint name="camera_bracket_joint" type="fixed">
+    <origin xyz="${cam_x * 0.55} ${cam_y} ${cam_z * 0.35}" rpy="0 0 0"/>
+    <parent link="link6"/>
+    <child link="camera_bracket_link"/>
+  </joint>
+
+  <!-- THE ground-truth mount: link6 -> camera_link -->
+  <joint name="camera_mount_joint" type="fixed">
+    <origin xyz="${cam_x} ${cam_y} ${cam_z}"
+            rpy="${cam_roll} ${cam_pitch} ${cam_yaw}"/>
+    <parent link="link6"/>
+    <child link="camera_link"/>
+  </joint>
+
+  <!-- optical frame: ROS convention (z forward, x right, y down) -->
+  <link name="camera_color_optical_frame"/>
+  <joint name="camera_optical_joint" type="fixed">
+    <origin xyz="0 0 0" rpy="${-pi/2} 0 ${-pi/2}"/>
+    <parent link="camera_link"/>
+    <child link="camera_color_optical_frame"/>
+  </joint>
+
+  <!-- ==================================================================== -->
+  <!--  ros2_control : limits COPIED FROM THE URDF, not invented             -->
+  <!-- ==================================================================== -->
+  <xacro:macro name="pos_joint" params="name lower upper initial">
+    <joint name="${name}">
+      <command_interface name="position">
+        <param name="min">${lower}</param>
+        <param name="max">${upper}</param>
+      </command_interface>
+      <state_interface name="position">
+        <param name="initial_value">${initial}</param>
+      </state_interface>
+      <state_interface name="velocity"/>
+      <state_interface name="effort"/>
+    </joint>
+  </xacro:macro>
+
+  <ros2_control name="GazeboSystem" type="system">
+    <hardware>
+      <plugin>gazebo_ros2_control/GazeboSystem</plugin>
+    </hardware>
+    <!-- initial values put the arm in a forward-and-down posture already near
+         the target, so the first move is short. -->
+    <xacro:pos_joint name="joint1" lower="-2.618" upper="2.618" initial="0.0"/>
+    <xacro:pos_joint name="joint2" lower="0.0"    upper="3.140" initial="1.10"/>
+    <xacro:pos_joint name="joint3" lower="-2.967" upper="0.0"   initial="-0.90"/>
+    <xacro:pos_joint name="joint4" lower="-1.745" upper="1.745" initial="0.0"/>
+    <xacro:pos_joint name="joint5" lower="-1.220" upper="1.220" initial="0.50"/>
+    <xacro:pos_joint name="joint6" lower="-2.094" upper="2.094" initial="0.0"/>
+    <!-- Gripper fingers: declared purely so a controller can HOLD them. Left
+         undeclared they are free joints and the fingers sag open under gravity.
+         They play no part in the calibration; the camera rides on link6. -->
+    <xacro:pos_joint name="joint7" lower="0.0"    upper="0.035" initial="0.02"/>
+    <xacro:pos_joint name="joint8" lower="-0.035" upper="0.0"   initial="-0.02"/>
+  </ros2_control>
+
+  <gazebo>
+    <plugin name="gazebo_ros2_control" filename="libgazebo_ros2_control.so">
+      <parameters>$(find piper_auto_handeye_sim)/config/sim_controllers.yaml</parameters>
+      <robot_param_node>robot_state_publisher</robot_param_node>
+    </plugin>
+  </gazebo>
+
+  <xacro:macro name="link_gz" params="name">
+    <gazebo reference="${name}">
+      <mu1>0.3</mu1>
+      <mu2>0.3</mu2>
+      <material>Gazebo/Grey</material>
+    </gazebo>
+  </xacro:macro>
+  <xacro:link_gz name="base_link"/>
+  <xacro:link_gz name="link1"/>
+  <xacro:link_gz name="link2"/>
+  <xacro:link_gz name="link3"/>
+  <xacro:link_gz name="link4"/>
+  <xacro:link_gz name="link5"/>
+  <xacro:link_gz name="link6"/>
+  <xacro:link_gz name="gripper_base"/>
+  <xacro:link_gz name="link7"/>
+  <xacro:link_gz name="link8"/>
+
+  <gazebo reference="camera_bracket_link">
+    <material>Gazebo/Grey</material>
+  </gazebo>
+
+  <gazebo reference="camera_link">
+    <material>Gazebo/DarkGrey</material>
+    <sensor type="camera" name="color">
+      <always_on>true</always_on>
+      <update_rate>${cam_rate}</update_rate>
+      <visualize>false</visualize>
+      <camera name="color">
+        <horizontal_fov>${cam_hfov}</horizontal_fov>
+        <image>
+          <width>${cam_width}</width>
+          <height>${cam_height}</height>
+          <format>R8G8B8</format>
+        </image>
+        <clip>
+          <near>0.02</near>
+          <far>10.0</far>
+        </clip>
+        <!-- No distortion: camera_info D stays zero (ideal pinhole). -->
+        <noise>
+          <type>gaussian</type>
+          <mean>0.0</mean>
+          <stddev>0.005</stddev>
+        </noise>
+      </camera>
+      <plugin name="camera_controller" filename="libgazebo_ros_camera.so">
+        <ros>
+          <namespace>/camera/camera</namespace>
+          <remapping>~/image_raw:=color/image_raw</remapping>
+          <remapping>~/camera_info:=color/camera_info</remapping>
+        </ros>
+        <frame_name>camera_color_optical_frame</frame_name>
+        <hack_baseline>0.0</hack_baseline>
+      </plugin>
+    </sensor>
+  </gazebo>
+
+</robot>

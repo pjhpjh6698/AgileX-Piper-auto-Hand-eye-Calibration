@@ -1,0 +1,56 @@
+<?xml version="1.0" ?>
+<!--
+  ArUco calibration target.
+
+  Geometry note (this is the #1 silent hand-eye error source):
+    black marker side          = 0.070 m   <- aruco.yaml : marker_length
+    white quiet zone per side  = 0.0175 m
+    full plate (box x/y below) = 0.105 m
+  If you regenerate the texture with a different pad ratio, update the box
+  size here to match; generate_aruco_texture.py prints both numbers.
+
+  The plate lies flat with the marker facing +Z (up), so a flange-mounted
+  camera looking down sees it. `static` keeps it rigidly fixed in the world,
+  which is what "target fixed in the workspace" requires.
+-->
+<sdf version="1.6">
+  <model name="aruco_marker">
+    <static>true</static>
+    <link name="link">
+      <visual name="marker_face">
+        <!-- lift the face just above the backing so it never z-fights -->
+        <pose>0 0 0.0031 0 0 0</pose>
+        <geometry>
+          <box><size>0.105 0.105 0.0002</size></box>
+        </geometry>
+        <material>
+          <script>
+            <uri>model://aruco_marker/materials/scripts</uri>
+            <uri>model://aruco_marker/materials/textures</uri>
+            <name>ArucoMarker/Face</name>
+          </script>
+        </material>
+      </visual>
+
+      <visual name="backing">
+        <pose>0 0 0.0015 0 0 0</pose>
+        <geometry>
+          <box><size>0.115 0.115 0.003</size></box>
+        </geometry>
+        <material>
+          <script>
+            <uri>file://media/materials/scripts/gazebo.material</uri>
+            <name>Gazebo/Grey</name>
+          </script>
+        </material>
+      </visual>
+
+      <collision name="collision">
+        <pose>0 0 0.0015 0 0 0</pose>
+        <geometry>
+          <box><size>0.115 0.115 0.003</size></box>
+        </geometry>
+      </collision>
+    </link>
+  </model>
+</sdf>

@@ -1,0 +1,31 @@
+# ArUco target detector parameters.
+# Loaded by aruco_detector_node. All lengths in meters.
+/**:
+  ros__parameters:
+    image_topic: /camera/camera/color/image_raw
+    camera_info_topic: /camera/camera/color/camera_info
+
+    # Calibration target: a SINGLE fixed ArUco marker (MVP).
+    aruco_dictionary: DICT_4X4_50     # see cv2.aruco.DICT_* names
+    target_marker_id: 1               # only this ID is used as the target
+    marker_length: 0.07               # marker side length [m]
+
+    # Frames
+    camera_frame: camera_color_optical_frame
+    target_frame: calibration_target
+
+    # Output
+    publish_debug_image: true
+    publish_tf: false                 # detector->target TF (debug only; not the handeye TF)
+
+    # Quality gates (a detection failing any of these is rejected)
+    maximum_reprojection_error: 3.0   # pixels
+    minimum_marker_area: 400.0        # px^2, reject markers that are too small/far
+    border_margin_px: 5.0             # reject markers whose corners hug the image border
+
+    # Temporal filtering across consecutive frames
+    pose_filter_window: 5
+    max_translation_jump_m: 0.05
+    max_rotation_jump_deg: 15.0
+
+    detection_timeout: 2.0            # s without a valid detection => 'stale'

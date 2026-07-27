@@ -1,0 +1,8 @@
+# Ask the TF publisher to (re)broadcast the static gripper_T_camera transform.
+string path            # empty => use currently loaded / default calibration
+bool publish           # true = start publishing, false = stop
+---
+bool success
+string message
+string parent_frame
+string child_frame

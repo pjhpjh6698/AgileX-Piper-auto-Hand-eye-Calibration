@@ -1,0 +1,70 @@
+<?xml version="1.0" ?>
+<!--
+  Hand-eye calibration world.
+
+  The Piper is spawned at the origin (its URDF bolts base_link to `world`).
+  The ArUco plate lies flat on a low table in front of the robot, inside the
+  reach of the calibration poses, so a flange-mounted camera looking down sees
+  it from every pose.
+
+  Marker placement is the thing you will most likely need to tune: run the sim,
+  look at /camera/camera/color/image_raw, and move the <pose> below until the
+  marker is comfortably in view from all poses.
+
+  Lighting is deliberately bright and diffuse. Hard shadows across the marker
+  are a real detection killer, and here they would only add noise that has
+  nothing to do with the calibration maths being verified.
+-->
+<sdf version="1.6">
+  <world name="handeye_calibration">
+
+    <physics type="ode">
+      <max_step_size>0.001</max_step_size>
+      <real_time_factor>1.0</real_time_factor>
+      <real_time_update_rate>1000</real_time_update_rate>
+    </physics>
+
+    <scene>
+      <ambient>0.7 0.7 0.7 1</ambient>
+      <background>0.55 0.6 0.65 1</background>
+      <shadows>false</shadows>
+    </scene>
+
+    <include><uri>model://ground_plane</uri></include>
+
+    <!-- broad, soft illumination so the marker keeps its contrast -->
+    <light type="directional" name="key_light">
+      <pose>0 0 3 0 0 0</pose>
+      <diffuse>0.8 0.8 0.8 1</diffuse>
+      <specular>0.1 0.1 0.1 1</specular>
+      <direction>-0.2 0.2 -1.0</direction>
+      <cast_shadows>false</cast_shadows>
+    </light>
+    <light type="directional" name="fill_light">
+      <pose>0 0 3 0 0 0</pose>
+      <diffuse>0.5 0.5 0.5 1</diffuse>
+      <specular>0.0 0.0 0.0 1</specular>
+      <direction>0.5 -0.4 -1.0</direction>
+      <cast_shadows>false</cast_shadows>
+    </light>
+
+    <!-- THE calibration target: flat on the floor, facing up (+Z).
+         Position comes from scripts/generate_poses.py, which picks the spot
+         the camera actually looks at across the arm's reachable poses. Keep
+         this in sync with the header of config/sim_calibration_poses.yaml.
+         No table: at x=0.247 a table would foul the robot base, and the floor
+         works just as well for a flat target. -->
+    <include>
+      <uri>model://aruco_marker</uri>
+      <name>aruco_marker</name>
+      <pose>0.351 0.044 0.003 0 0 0</pose>
+    </include>
+
+    <gui>
+      <camera name="user_camera">
+        <pose>1.4 -1.0 0.9 0 0.35 2.45</pose>
+      </camera>
+    </gui>
+
+  </world>
+</sdf>

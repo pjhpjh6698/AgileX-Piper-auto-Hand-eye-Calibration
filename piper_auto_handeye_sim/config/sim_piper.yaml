@@ -1,0 +1,49 @@
+# Piper control adapter parameters for GAZEBO.
+#
+# The adapter is UNCHANGED from hardware: it still talks /end_pose_stamped and
+# /pos_cmd. gazebo_piper_driver_node provides those on top of Gazebo, so this
+# file only relaxes what simulation genuinely changes.
+#
+# SAFETY: dry_run is false here, which is safe *because the robot is simulated*.
+# Never copy this file over config/piper.yaml for real hardware.
+/**:
+  ros__parameters:
+    use_sim_time: true
+
+    control_backend: topic
+
+    end_pose_topic: /end_pose_stamped
+    arm_status_topic: /arm_status
+    joint_state_topic: /joint_states_single
+    pos_cmd_topic: /pos_cmd
+    enable_topic: /enable_flag
+
+    base_frame: base_link
+    gripper_frame: link6
+
+    dry_run: false                    # simulated robot: motion is safe
+
+    # Piper's real reach; kept identical to hardware so pose validation in sim
+    # is meaningful for the real robot too.
+    workspace_min: [0.05, -0.45, 0.05]
+    workspace_max: [0.65,  0.45, 0.70]
+    max_step_distance: 0.60           # sim starts from a folded home pose
+    max_speed_fraction: 1.0
+    default_speed_fraction: 1.0
+
+    movement_timeout: 25.0
+
+    # Looser than hardware: the trajectory controller settles to within a few
+    # mm of the IK solution, and IK itself has a small residual. Calibration
+    # accuracy does NOT depend on hitting the target exactly -- the pose that
+    # is actually reached is measured by FK.
+    goal_position_tolerance: 0.02
+    goal_orientation_tolerance_deg: 3.0
+
+    settle_check_time: 0.4
+    stopped_translation_eps: 0.0015
+    stopped_rotation_eps_deg: 0.4
+
+    require_enabled_to_move: false    # no CAN enable handshake in Gazebo
+    auto_enable: false
+    pose_timeout: 1.0

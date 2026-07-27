@@ -1,0 +1,15 @@
+<library path="piper_auto_handeye_gui">
+  <class name="Piper Auto Hand-Eye" type="piper_auto_handeye_gui.handeye_gui_plugin.HandeyeGuiPlugin"
+         base_class_type="rqt_gui_py::Plugin">
+    <description>
+      GUI to run and monitor automatic Eye-in-Hand calibration for the Piper arm.
+    </description>
+    <qtgui>
+      <group>
+        <label>Calibration</label>
+      </group>
+      <label>Piper Auto Hand-Eye</label>
+      <statustip>Run and monitor Piper hand-eye calibration.</statustip>
+    </qtgui>
+  </class>
+</library>

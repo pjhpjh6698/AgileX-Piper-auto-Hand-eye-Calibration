@@ -1,0 +1,52 @@
+# Hand-eye calibration manager parameters for GAZEBO.
+#
+# Identical to hardware except where simulation genuinely differs; the point of
+# this setup is to exercise the SAME code path, not a special sim-only one.
+/**:
+  ros__parameters:
+    use_sim_time: true
+
+    calibration_type: eye_in_hand
+    calibration_method: PARK
+    minimum_samples: 10
+    target_samples: 35          # the generated pose set has 35 poses
+
+    # Rest pose: where the arm parks when a run ends (success, failure or
+    # cancel) and whenever reset_calibration is called. Matches the initial
+    # joint values in the xacro, so the arm returns to the posture it started
+    # in rather than staying stretched over the workspace.
+    return_to_rest: true
+    rest_position: [0.2323, 0.0, 0.3334]
+    rest_rpy: [-3.1416, 0.9580, 3.1416]
+
+    base_frame: base_link
+    gripper_frame: link6
+    camera_frame: camera_color_optical_frame
+    target_frame: calibration_target
+
+    # The trajectory controller needs a moment to fully settle after the
+    # controller reports arrival; Gazebo joints ring slightly.
+    settle_time: 1.2
+    observations_per_pose: 8
+    marker_timeout: 6.0
+    marker_stability_min: 0.6
+    maximum_pose_time_difference: 0.2
+
+    # The generated poses are >= 8 deg apart by construction, so this gate
+    # rejects nothing legitimate while still catching a stuck robot.
+    minimum_rotation_difference_deg: 5.0
+    on_marker_timeout: skip
+
+    marker_topic: marker_detection
+    robot_state_topic: robot_state
+
+    # A noise-free renderer should do far better than hardware. Keeping the
+    # thresholds tight means a regression shows up as WARNING rather than
+    # hiding inside a loose tolerance.
+    maximum_translation_rms_m: 0.005
+    maximum_rotation_rms_deg: 0.5
+    enable_outlier_removal: true
+    max_outlier_removals: 3
+
+    output_directory: ""        # => ~/.ros/piper_auto_handeye
+    save_on_success: true

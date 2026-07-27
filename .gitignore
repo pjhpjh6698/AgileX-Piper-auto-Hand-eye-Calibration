@@ -1,0 +1,15 @@
+# Build artifacts. NEVER transfer these between machines: colcon bakes absolute
+# paths into CMakeCache.txt, so a copied build/ from another machine fails with
+# "The current CMakeCache.txt directory ... is different than the directory ...
+# where CMakeCache.txt was created" and the package silently refuses to build.
+build/
+install/
+log/
+
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# Calibration results live in ~/.ros/piper_auto_handeye, not in the repo.
+*.yaml.bak

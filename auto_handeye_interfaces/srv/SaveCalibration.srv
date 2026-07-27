@@ -1,0 +1,6 @@
+# Persist the last computed calibration to disk.
+string path            # empty => use configured output_directory / default name
+---
+bool success
+string message
+string saved_path

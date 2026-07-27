@@ -1,0 +1,41 @@
+# Piper control adapter parameters.
+# The adapter talks to the EXISTING Piper driver (piper_ctrl_single_node) over
+# ROS topics -- it does NOT open the CAN bus itself:
+#   reads  /end_pose_stamped (PoseStamped, base_T_gripper), /arm_status
+#   writes /pos_cmd (piper_msgs/PosCmd, Cartesian moveL), /enable_flag (Bool)
+#
+# !!! SAFETY: dry_run defaults to true. Physical motion requires dry_run:=false
+#     AND a per-goal dry_run=false. Validate the workspace bounds and every
+#     calibration pose in simulation/mock BEFORE ever setting dry_run:=false. !!!
+/**:
+  ros__parameters:
+    control_backend: topic            # 'topic' (reuse existing driver) | 'sdk' (TODO)
+
+    # Topic names of the existing Piper driver
+    end_pose_topic: /end_pose_stamped
+    arm_status_topic: /arm_status
+    joint_state_topic: /joint_states_single
+    pos_cmd_topic: /pos_cmd
+    enable_topic: /enable_flag
+
+    # Frames
+    base_frame: base_link
+    gripper_frame: link6              # Piper flange = SDK end-effector pose frame
+
+    # ---- SAFETY LIMITS ----
+    dry_run: true                     # master safety switch; keep true until verified
+    # Cartesian workspace bounds [m] (base frame). A goal outside is rejected.
+    workspace_min: [0.05, -0.45, 0.05]
+    workspace_max: [0.65,  0.45, 0.70]
+    max_step_distance: 0.35           # reject a single move longer than this [m]
+    max_speed_fraction: 0.4           # cap of the 0..1 speed sent to the driver
+    default_speed_fraction: 0.2
+    movement_timeout: 30.0            # s per move before failing
+    goal_position_tolerance: 0.01     # m, "arrived" threshold
+    goal_orientation_tolerance_deg: 2.0
+    settle_check_time: 0.5            # s the pose must stay still to be "stopped"
+    stopped_translation_eps: 0.002    # m frame-to-frame movement below this = stopped
+    stopped_rotation_eps_deg: 0.5
+    require_enabled_to_move: true
+    auto_enable: true                 # publish enable_flag before a live move if not enabled
+    pose_timeout: 1.0                 # s without /end_pose => report disconnected

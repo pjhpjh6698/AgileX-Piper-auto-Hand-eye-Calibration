@@ -1,0 +1,8 @@
+# Load a calibration YAML from disk into the node (does not publish TF by itself).
+string path            # empty => use configured default location
+---
+bool success
+string message
+geometry_msgs/Transform transform   # gripper_T_camera
+string parent_frame
+string child_frame

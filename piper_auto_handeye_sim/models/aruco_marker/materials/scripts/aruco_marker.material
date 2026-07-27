@@ -1,0 +1,24 @@
+material ArucoMarker/Face
+{
+  receive_shadows off
+  technique
+  {
+    pass
+    {
+      // Unlit so the marker stays high-contrast regardless of scene lighting.
+      // Shading would otherwise darken it at steep viewing angles and hurt
+      // detection exactly at the poses that matter most for hand-eye.
+      lighting off
+      ambient  1.0 1.0 1.0 1.0
+      diffuse  1.0 1.0 1.0 1.0
+      specular 0.0 0.0 0.0 1.0 0.0
+
+      texture_unit
+      {
+        texture aruco_marker.png
+        filtering trilinear
+        tex_address_mode clamp
+      }
+    }
+  }
+}

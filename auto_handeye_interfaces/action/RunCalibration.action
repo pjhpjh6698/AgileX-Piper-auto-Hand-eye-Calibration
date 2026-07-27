@@ -1,0 +1,28 @@
+# Run the full hand-eye calibration procedure (Eye-in-Hand).
+# When auto_move=true the manager drives the robot through calibration_poses.yaml.
+# When auto_move=false the manager waits for manual samples (AddManualSample srv).
+int32 target_sample_count       # <=0 => use configured target_samples
+bool auto_move                  # true => drive robot automatically
+string calibration_method       # TSAI|PARK|HORAUD|ANDREFF|DANIILIDIS, ""=>config default
+float64 settle_time             # seconds to wait after motion, <=0 => config default
+int32 observations_per_pose     # frames averaged per pose, <=0 => config default
+bool save_on_success            # write YAML automatically on SUCCESS
+string output_path              # empty => configured output_directory
+---
+bool success
+string state                    # final state (SUCCESS|WARNING|FAILED|CANCELED)
+geometry_msgs/Transform gripper_to_camera   # calibration result (gripper_T_camera)
+int32 sample_count
+float64 translation_rms_m
+float64 translation_max_m
+float64 rotation_rms_deg
+float64 rotation_max_deg
+string saved_path
+string message
+---
+string state
+int32 current_sample_count
+int32 target_sample_count
+int32 current_pose_index
+float32 progress
+string message

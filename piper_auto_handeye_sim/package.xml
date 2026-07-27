@@ -1,0 +1,36 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>piper_auto_handeye_sim</name>
+  <version>0.1.0</version>
+  <description>Gazebo simulation for verifying Piper Eye-in-Hand calibration against a known ground truth.</description>
+  <maintainer email="pjhpjh6698@gmail.com">jh</maintainer>
+  <license>Apache-2.0</license>
+
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>std_msgs</exec_depend>
+  <exec_depend>sensor_msgs</exec_depend>
+  <exec_depend>geometry_msgs</exec_depend>
+  <exec_depend>trajectory_msgs</exec_depend>
+  <exec_depend>tf2_ros</exec_depend>
+  <exec_depend>xacro</exec_depend>
+  <exec_depend>robot_state_publisher</exec_depend>
+  <exec_depend>gazebo_ros</exec_depend>
+  <exec_depend>gazebo_ros2_control</exec_depend>
+  <exec_depend>controller_manager</exec_depend>
+  <exec_depend>joint_trajectory_controller</exec_depend>
+  <exec_depend>joint_state_broadcaster</exec_depend>
+  <!-- piper_description supplies piper_no_gripper_description.urdf + meshes.
+       piper_gazebo is deliberately NOT a dependency: this package ships its own
+       config/sim_controllers.yaml because piper_gazebo's also declares gripper
+       controllers for joint7/joint8, which this arm-only model does not have. -->
+  <exec_depend>piper_description</exec_depend>
+  <exec_depend>piper_msgs</exec_depend>
+  <exec_depend>piper_auto_handeye</exec_depend>
+  <exec_depend>python3-numpy</exec_depend>
+  <exec_depend>python3-opencv</exec_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

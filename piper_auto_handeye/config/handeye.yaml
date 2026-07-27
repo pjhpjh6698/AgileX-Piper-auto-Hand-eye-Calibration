@@ -1,0 +1,37 @@
+# Hand-eye calibration manager parameters.
+/**:
+  ros__parameters:
+    calibration_type: eye_in_hand
+
+    calibration_method: TSAI          # Tsai-Lenz. Alt: PARK|HORAUD|ANDREFF|DANIILIDIS
+    minimum_samples: 10               # hard floor for solving (recommended 15-25)
+    target_samples: 15
+
+    # Frames (must match piper.yaml / aruco.yaml)
+    base_frame: base_link
+    gripper_frame: link6
+    camera_frame: camera_color_optical_frame
+    target_frame: calibration_target
+
+    # Timing / collection
+    settle_time: 1.0                  # s to wait after motion stops
+    observations_per_pose: 10         # marker frames averaged per pose
+    marker_timeout: 5.0               # s to wait for a valid marker per pose
+    marker_stability_min: 0.6         # min PoseFilter stability score to accept
+    maximum_pose_time_difference: 0.2 # s between robot pose and marker pose
+    minimum_rotation_difference_deg: 5.0   # reject near-duplicate orientations
+    on_marker_timeout: skip           # skip | fail
+
+    # Input topics (from the other nodes)
+    marker_topic: marker_detection    # auto_handeye_interfaces/MarkerDetection
+    robot_state_topic: robot_state    # auto_handeye_interfaces/RobotState
+
+    # Validation thresholds
+    maximum_translation_rms_m: 0.01
+    maximum_rotation_rms_deg: 1.0
+    enable_outlier_removal: true
+    max_outlier_removals: 3
+
+    # Output
+    output_directory: ""              # "" => ~/.ros/piper_auto_handeye
+    save_on_success: true

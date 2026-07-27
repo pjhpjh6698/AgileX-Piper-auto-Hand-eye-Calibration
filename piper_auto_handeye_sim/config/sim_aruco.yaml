@@ -1,0 +1,36 @@
+# ArUco detector parameters for the GAZEBO target.
+# Differences from the real-hardware config/aruco.yaml:
+#   * marker_length matches the rendered plate (0.10 m black marker),
+#     NOT the 0.15 m box -- see models/aruco_marker/model.sdf.
+#   * quality gates are a little looser: the Gazebo renderer aliases the
+#     marker edges at distance, which inflates reprojection error even though
+#     the pose is fine.
+/**:
+  ros__parameters:
+    use_sim_time: true
+
+    image_topic: /camera/camera/color/image_raw
+    camera_info_topic: /camera/camera/color/camera_info
+
+    aruco_dictionary: DICT_4X4_50
+    target_marker_id: 1
+    marker_length: 0.07          # black marker side [m]; MUST match the texture
+
+    camera_frame: camera_color_optical_frame
+    target_frame: calibration_target
+
+    publish_debug_image: true
+    publish_tf: false
+
+    maximum_reprojection_error: 4.0   # px (renderer aliasing; 3.0 on real HW)
+    minimum_marker_area: 300.0        # px^2
+    border_margin_px: 4.0
+
+    pose_filter_window: 5
+    max_translation_jump_m: 0.05
+    max_rotation_jump_deg: 15.0
+
+    detection_timeout: 2.0
+
+    # Ground truth used by synthetic_marker_publisher_node only (unused here).
+    target_marker_id_synthetic: 1

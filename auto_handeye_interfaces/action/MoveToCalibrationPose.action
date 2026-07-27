@@ -1,0 +1,22 @@
+# Move the robot to a calibration pose. Either give an index into
+# calibration_poses.yaml, or an explicit target pose (base_T_gripper).
+#
+# SAFETY: dry_run defaults to true at the parameter level; a goal must set
+# dry_run=false explicitly AND the node's global dry_run must be false for the
+# robot to physically move.
+int32 pose_index            # >=0 to use configured pose list; <0 to use target_pose
+geometry_msgs/Pose target_pose   # base_T_gripper, used when pose_index < 0
+float64 speed               # 0..1 fraction of max, <=0 => use configured default
+float64 acceleration        # 0..1 fraction of max, <=0 => use configured default
+float64 timeout             # seconds, <=0 => use configured default
+bool dry_run                # true = validate + simulate only, never command robot
+---
+bool success
+geometry_msgs/Pose final_pose    # base_T_gripper reached
+string error_message
+---
+geometry_msgs/Pose current_pose  # base_T_gripper
+float64 position_error           # meters to goal
+float64 orientation_error        # degrees to goal
+float64 elapsed_time             # seconds
+bool moving
