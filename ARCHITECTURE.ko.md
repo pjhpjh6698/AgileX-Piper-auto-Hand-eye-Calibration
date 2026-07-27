@@ -32,7 +32,7 @@
 graph TB
     subgraph HW["하드웨어 계층"]
         CAM["RealSense 카메라<br/>realsense2_camera"]
-        DRV["Piper 드라이버<br/>piper_ctrl_single_node<br/>(CAN 버스 소유)"]
+        DRV["AgileX 드라이버<br/>agx_arm_ctrl (pyAgxArm)<br/>(CAN 버스 소유)"]
         MOCK["mock_robot_node<br/>(드라이버 대역)"]
     end
 
@@ -83,10 +83,14 @@ graph TB
 | 관리 | 상태 머신, 언제 샘플을 딸지 결정 | 로봇·카메라 종류와 무관한 순수 절차 |
 | 수학 코어 | ROS 없이 numpy만 | 하드웨어 없이 단위 테스트 가능 |
 
-> **가장 중요한 설계 결정**: `piper_control_node`는 `piper_sdk`를 다시 감싸지
-> 않습니다. 워크스페이스에 이미 동작하는 드라이버가 있으므로 그 **ROS 토픽에만**
-> 말을 겁니다. 그래서 `mock_robot_node`가 같은 토픽을 흉내내기만 하면 전체
-> 스택이 하드웨어 없이 그대로 돌아갑니다.
+> **가장 중요한 설계 결정**: `piper_control_node`는 SDK를 다시 감싸지 않습니다.
+> CAN 버스는 벤더 드라이버 `agx_arm_ctrl`이 소유하고, 컨트롤 노드는 그 **ROS
+> 인터페이스에만** 말을 겁니다. 그래서 `mock_robot_node`나 Gazebo 드라이버가
+> 같은 인터페이스를 흉내내기만 하면 전체 스택이 하드웨어 없이 그대로 돌아갑니다.
+>
+> 실기는 `control_backend: agx`(`control/move_p`, `feedback/tcp_pose`),
+> 시뮬레이션은 `control_backend: topic`(구버전 `/pos_cmd`)을 씁니다. 두 백엔드는
+> 같은 내부 상태 머신에 데이터를 넣으므로 그 위 계층은 전부 동일한 코드입니다.
 
 ---
 

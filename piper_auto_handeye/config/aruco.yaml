@@ -1,14 +1,32 @@
 # ArUco target detector parameters.
 # Loaded by aruco_detector_node. All lengths in meters.
+#
+# TWO RealSense cameras are attached to this machine, so the topics below are
+# namespaced to the WRIST one (the eye-in-hand camera). real_calibration.launch.py
+# starts it with camera_namespace:=wrist camera_name:=camera and pins it by
+# serial number, so nothing depends on USB enumeration order.
 /**:
   ros__parameters:
-    image_topic: /camera/camera/color/image_raw
-    camera_info_topic: /camera/camera/color/camera_info
+    image_topic: /wrist/camera/color/image_raw
+    camera_info_topic: /wrist/camera/color/camera_info
 
-    # Calibration target: a SINGLE fixed ArUco marker (MVP).
+    # Calibration target. target_type picks between:
+    #   aruco   -- a single ArUco marker (default)
+    #   charuco -- a ChArUco board: chessboard corners interpolated from the
+    #              ArUco markers printed in its white squares. Many corners
+    #              instead of 4, so the pose is considerably more stable.
+    # Switchable at runtime from the GUI (or `ros2 param set`).
+    target_type: aruco
     aruco_dictionary: DICT_4X4_50     # see cv2.aruco.DICT_* names
     target_marker_id: 1               # only this ID is used as the target
     marker_length: 0.07               # marker side length [m]
+
+    # ---- charuco board geometry (only used when target_type: charuco) ----
+    charuco_squares_x: 5              # squares along X
+    charuco_squares_y: 7              # squares along Y
+    charuco_square_length: 0.035      # chessboard square side [m] -- MEASURE the print
+    charuco_marker_length: 0.026      # ArUco side inside the squares [m]
+    charuco_min_corners: 6            # fewer interpolated corners => rejected
 
     # Frames
     camera_frame: camera_color_optical_frame
@@ -18,10 +36,29 @@
     publish_debug_image: true
     publish_tf: false                 # detector->target TF (debug only; not the handeye TF)
 
+    # Planar pose-flip ambiguity gate. A square marker seen near-frontally has
+    # TWO PnP solutions with almost equal reprojection error; letting the
+    # winner flip frame-to-frame corrupts camera_T_target by tens of degrees
+    # and makes every hand-eye method "agree" on a garbage result (~15 deg
+    # rotation RMS). Below this best/second error ratio the frame is
+    # disambiguated against the previous pose or rejected as pose_ambiguous.
+    ambiguity_min_ratio: 1.3
+
     # Quality gates (a detection failing any of these is rejected)
     maximum_reprojection_error: 3.0   # pixels
     minimum_marker_area: 400.0        # px^2, reject markers that are too small/far
     border_margin_px: 5.0             # reject markers whose corners hug the image border
+
+    # Sub-pixel corner refinement. Leave this on: OpenCV's default is
+    # CORNER_REFINE_NONE, which snaps marker corners to whole pixels, and since
+    # solvePnP derives the pose from corner positions a one-pixel wobble becomes
+    # degrees of orientation jitter. That jitter is what makes stability_score
+    # dip below the acceptance gate and samples get rejected.
+    # none | subpix | contour | apriltag
+    corner_refinement: subpix
+    corner_refinement_win_size: 5
+    corner_refinement_max_iterations: 50
+    corner_refinement_min_accuracy: 0.01
 
     # Temporal filtering across consecutive frames
     pose_filter_window: 5

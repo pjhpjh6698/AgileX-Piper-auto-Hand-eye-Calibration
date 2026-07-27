@@ -1,11 +1,19 @@
-# Move the robot to a calibration pose. Either give an index into
-# calibration_poses.yaml, or an explicit target pose (base_T_gripper).
+# Move the robot to a calibration pose. Give an index into
+# calibration_poses.yaml, an explicit Cartesian target (base_T_gripper), or an
+# explicit joint-space target.
 #
-# SAFETY: dry_run defaults to true at the parameter level; a goal must set
-# dry_run=false explicitly AND the node's global dry_run must be false for the
-# robot to physically move.
-int32 pose_index            # >=0 to use configured pose list; <0 to use target_pose
-geometry_msgs/Pose target_pose   # base_T_gripper, used when pose_index < 0
+# PREFER JOINT-SPACE for calibration. A Cartesian goal has to be inverted by the
+# arm's controller, and a pose that a URDF calls reachable is not necessarily
+# reachable in the arm's own kinematic model -- when it is not, the arm accepts
+# the command, finds no solution, and silently does not move. Joint targets
+# bypass IK entirely, so anything inside the joint limits always executes.
+# Accuracy does not suffer: the calibration consumes the MEASURED base_T_gripper
+# from feedback, never the commanded pose.
+#
+# SAFETY: the node's dry_run parameter must be false for the robot to move.
+int32 pose_index            # >=0 to use configured pose list; <0 to use the explicit target
+float64[] target_joints     # joint-space goal [rad]; takes precedence when non-empty
+geometry_msgs/Pose target_pose   # base_T_gripper, used when target_joints is empty
 float64 speed               # 0..1 fraction of max, <=0 => use configured default
 float64 acceleration        # 0..1 fraction of max, <=0 => use configured default
 float64 timeout             # seconds, <=0 => use configured default
@@ -16,7 +24,7 @@ geometry_msgs/Pose final_pose    # base_T_gripper reached
 string error_message
 ---
 geometry_msgs/Pose current_pose  # base_T_gripper
-float64 position_error           # meters to goal
-float64 orientation_error        # degrees to goal
+float64 position_error           # meters to goal (0 for joint-space goals)
+float64 orientation_error        # degrees to goal (max joint error for joint goals)
 float64 elapsed_time             # seconds
 bool moving

@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """Mock Piper driver for hardware-free testing.
 
-Emulates the EXISTING ``piper_ctrl_single_node`` interface so that
-``piper_control_node`` (and the whole calibration stack) runs unchanged:
+Emulates the older AgileX ``/pos_cmd`` driver interface, which is what
+``piper_control_node``'s ``topic`` backend speaks. Run the control node with
+``control_backend:=topic`` against this; the real robot uses ``agx`` and the
+``agx_arm_ctrl`` driver instead.
 
-  subscribes  pos_cmd_topic  (PosCmd)   -> Cartesian moveL goal
+  subscribes  pos_cmd_topic  (PosCmd)   -> Cartesian goal
               enable_topic   (Bool)     -> enable flag
   publishes   end_pose_topic (PoseStamped) base_T_gripper, interpolated
               arm_status_topic (PiperStatusMsg)  (if piper_msgs available)

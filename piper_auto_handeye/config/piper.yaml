@@ -1,17 +1,57 @@
 # Piper control adapter parameters.
-# The adapter talks to the EXISTING Piper driver (piper_ctrl_single_node) over
-# ROS topics -- it does NOT open the CAN bus itself:
-#   reads  /end_pose_stamped (PoseStamped, base_T_gripper), /arm_status
-#   writes /pos_cmd (piper_msgs/PosCmd, Cartesian moveL), /enable_flag (Bool)
 #
-# !!! SAFETY: dry_run defaults to true. Physical motion requires dry_run:=false
-#     AND a per-goal dry_run=false. Validate the workspace bounds and every
-#     calibration pose in simulation/mock BEFORE ever setting dry_run:=false. !!!
+# control_backend picks how the adapter reaches the arm:
+#
+#   agx    -- (default) REAL ROBOT. Talks to the vendored AgileX ROS 2 driver
+#             `agx_arm_ctrl`, which drives the arm over CAN through pyAgxArm.
+#             Standard message types throughout; see agx_arm_ctrl/VENDOR.md.
+#
+#   topic  -- SIMULATION. The older AgileX /pos_cmd interface, which
+#             mock_robot_node and the Gazebo driver emulate. The sim configs
+#             select it; do not use it against hardware.
+#
+# !!! SAFETY: dry_run is false, so pressing Start MOVES THE ROBOT. What keeps a
+#     run safe is the limits below -- workspace bounds, max_step_distance,
+#     max_speed_fraction -- plus the STOP button. Verify every pose in
+#     calibration_poses.yaml against your setup before the first run. !!!
 /**:
   ros__parameters:
-    control_backend: topic            # 'topic' (reuse existing driver) | 'sdk' (TODO)
+    control_backend: agx
 
-    # Topic names of the existing Piper driver
+    # ---- 'agx' backend ----
+    # Fully-qualified name of the agx_arm_ctrl node, used to set speed_percent.
+    # Must match the driver's actual node name or per-goal speed will fail.
+    agx_driver_node: /agx_arm_ctrl_single_node
+    agx_tcp_pose_topic: feedback/tcp_pose
+    agx_joint_state_topic: feedback/joint_states
+    agx_arm_status_topic: feedback/arm_status
+    agx_enable_service: enable_agx_arm
+    agx_estop_service: emergency_stop
+    # P = point-to-point (joint-interpolated path to the Cartesian goal)
+    # L = straight-line Cartesian path
+    # P is the default: calibration poses differ a lot in orientation, where
+    # forcing a straight line invites singularities and joint-limit aborts.
+    agx_move_mode: P
+    # PoseStamped carries no speed, so the cap below is pushed to the driver as
+    # its speed_percent parameter before each goal. Turning this off means the
+    # arm moves at whatever speed_percent the driver was launched with.
+    agx_set_speed: true
+    agx_service_timeout: 3.0
+
+    # ---- joint-space goals (the PREFERRED path for calibration) ----
+    # A Cartesian goal must be inverted by the arm's controller, and a pose a
+    # URDF calls reachable need not be reachable in the arm's own kinematic
+    # model -- when it is not, the arm accepts the command, finds no solution
+    # and silently does not move. Joint goals bypass IK, so anything inside the
+    # limits always executes. Accuracy is unaffected: the calibration uses the
+    # MEASURED base_T_gripper from feedback, never the commanded pose.
+    # Write `joints:` entries in calibration_poses.yaml to use this path;
+    # generate a reachable set with `ros2 run piper_auto_handeye generate_poses`.
+    joint_names: [joint1, joint2, joint3, joint4, joint5, joint6]
+    joint_goal_tolerance_deg: 1.0     # per-joint "arrived" threshold
+    joint_limit_margin_deg: 2.0       # refuse goals this close to a mechanical stop
+
+    # ---- 'topic' backend (simulation only): AgileX /pos_cmd interface ----
     end_pose_topic: /end_pose_stamped
     arm_status_topic: /arm_status
     joint_state_topic: /joint_states_single
@@ -23,19 +63,42 @@
     gripper_frame: link6              # Piper flange = SDK end-effector pose frame
 
     # ---- SAFETY LIMITS ----
-    dry_run: true                     # master safety switch; keep true until verified
-    # Cartesian workspace bounds [m] (base frame). A goal outside is rejected.
-    workspace_min: [0.05, -0.45, 0.05]
-    workspace_max: [0.65,  0.45, 0.70]
+    # false: pressing Start actually moves the arm. This is the real-robot
+    # entry point, so that is the useful default; the limits below (workspace
+    # bounds, step distance, speed cap) are what keep it safe, and the GUI shows
+    # a red LIVE banner whenever motion is armed.
+    # Set true to walk the pose list without commanding anything.
+    dry_run: false
+    # Cartesian workspace bounds [m] (base frame). A goal outside is rejected;
+    # for a joint-space goal the FLANGE position is checked, so the arm still
+    # cannot be swung out of the agreed volume.
+    #
+    # These cover the Piper's real envelope, which includes folding back over
+    # its own base -- the flange sits around x=0.03..0.10 when the arm is parked
+    # upright, so a lower bound of x=0.05 (the old value, written for poses out
+    # at x=0.3+) rejected perfectly good poses near home.
+    # The z floor is the table guard: raise it if your marker plate is thick.
+    workspace_min: [-0.15, -0.45, 0.05]
+    workspace_max: [ 0.65,  0.45, 0.75]
     max_step_distance: 0.35           # reject a single move longer than this [m]
     max_speed_fraction: 0.4           # cap of the 0..1 speed sent to the driver
-    default_speed_fraction: 0.2
+    # 0.26 = the old 0.20 raised 30% for a snappier calibration cadence; the
+    # cap above still bounds every goal, and the collector never samples while
+    # the arm is moving, so accuracy is unaffected by travel speed.
+    default_speed_fraction: 0.26
     movement_timeout: 30.0            # s per move before failing
     goal_position_tolerance: 0.01     # m, "arrived" threshold
     goal_orientation_tolerance_deg: 2.0
-    settle_check_time: 0.5            # s the pose must stay still to be "stopped"
+    # s the pose must stay still to count as "arrived". 0.35 is still 17
+    # consecutive quiet robot_state frames at 50 Hz -- ample evidence.
+    settle_check_time: 0.35
     stopped_translation_eps: 0.002    # m frame-to-frame movement below this = stopped
     stopped_rotation_eps_deg: 0.5
     require_enabled_to_move: true
     auto_enable: true                 # publish enable_flag before a live move if not enabled
     pose_timeout: 1.0                 # s without /end_pose => report disconnected
+    # A dry run never moves the arm, so without this the step-distance check
+    # would measure every pose from where the arm is parked instead of from the
+    # previous pose, and reject reachable poses late in the sweep. Consecutive
+    # dry goals within this many seconds are chained into one simulated run.
+    dry_run_chain_timeout: 5.0

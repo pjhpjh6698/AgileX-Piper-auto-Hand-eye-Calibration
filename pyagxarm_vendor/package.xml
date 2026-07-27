@@ -1,0 +1,22 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>pyagxarm_vendor</name>
+  <version>1.0.0</version>
+  <description>
+    Vendored AgileX pyAgxArm SDK (upstream v1.0.0), packaged so the calibration
+    workspace can import pyAgxArm from a plain colcon build without a separate
+    pip install. Source is upstream-identical apart from a dropped demos
+    directory. See VENDOR.md for provenance and update steps.
+  </description>
+  <maintainer email="pjhpjh6698@gmail.com">jh</maintainer>
+  <license>MIT</license>
+  <url type="repository">https://github.com/agilexrobotics/pyAgxArm</url>
+
+  <exec_depend>python3-can</exec_depend>
+  <exec_depend>python3-typing-extensions</exec_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

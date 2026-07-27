@@ -34,7 +34,10 @@ def generate_launch_description():
         package="piper_auto_handeye", executable="piper_control_node",
         name="piper_control_node",
         # dry_run False is SAFE here: the "robot" is the mock, no hardware moves.
-        parameters=[piper_cfg, {"dry_run": False}], output="screen")
+        # Force the topic backend -- mock_robot_node emulates the driver topics,
+        # and the sdk backend would try to open a real CAN bus instead.
+        parameters=[piper_cfg, {"dry_run": False, "control_backend": "topic"}],
+        output="screen")
 
     manager = Node(
         package="piper_auto_handeye", executable="handeye_calibration_node",

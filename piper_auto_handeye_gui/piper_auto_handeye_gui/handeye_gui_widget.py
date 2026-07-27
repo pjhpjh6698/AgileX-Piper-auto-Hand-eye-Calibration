@@ -35,7 +35,8 @@ from python_qt_binding.QtWidgets import (
     QHBoxLayout, QLabel, QPlainTextEdit, QProgressBar, QPushButton, QSpinBox,
     QSplitter, QVBoxLayout, QWidget)
 
-from rcl_interfaces.srv import GetParameters
+from rcl_interfaces.srv import GetParameters, SetParameters
+from rclpy.parameter import Parameter
 from sensor_msgs.msg import Image
 from std_srvs.srv import Trigger
 
@@ -58,6 +59,10 @@ _STATE_COLORS = {
     "MOVING": ("#ef6c00", "#ffffff"),
     "SETTLING": ("#f9a825", "#000000"),
     "WAITING_FOR_MARKER": ("#f9a825", "#000000"),
+    # marker occluded (usually by the gripper); the wrist is being repositioned
+    "RECOVERING": ("#6a1b9a", "#ffffff"),
+    "HOMING": ("#00695c", "#ffffff"),      # moving to the down-looking home
+    "ALIGNING": ("#00838f", "#ffffff"),    # centering above the marker
     "COLLECTING": ("#0288d1", "#ffffff"),
     "SAMPLE_ACCEPTED": ("#2e7d32", "#ffffff"),
     "SAMPLE_REJECTED": ("#c62828", "#ffffff"),
@@ -88,6 +93,7 @@ class HandeyeGuiWidget(QWidget):
     sig_result = Signal(object)
     sig_goal_done = Signal()
     sig_live = Signal(bool)
+    sig_can = Signal(bool, str)      # (success, message) from the bring-up thread
 
     def __init__(self, node):
         super().__init__()
@@ -99,6 +105,9 @@ class HandeyeGuiWidget(QWidget):
         self._paused = False
         self._last_saved_path = ""
         self._closing = False
+        self._can_port = "can_follower"      # refreshed from the driver's parameter
+        self._arm_connected = False          # last RobotState.connected
+        self._can_busy = False               # a bring-up is in flight
 
         self._build_ui()
         self._connect_signals()
@@ -109,6 +118,20 @@ class HandeyeGuiWidget(QWidget):
         self._live_timer.timeout.connect(self._query_dry_run)
         self._live_timer.start(2000)
         self._query_dry_run()
+
+        # CAN link polling. Reading the link state is a cheap local syscall, so
+        # poll it rather than making the user press a button to notice a drop.
+        self._can_timer = QTimer(self)
+        self._can_timer.timeout.connect(self._refresh_can)
+        self._can_timer.start(2000)
+        self._query_can_port()
+        self._refresh_can()
+
+        # Show the detector's ACTUAL marker ID/size instead of GUI defaults;
+        # retries ride the CAN timer until the parameter service answers once.
+        self._marker_cfg_loaded = False
+        self._can_timer.timeout.connect(self._query_marker_settings)
+        self._query_marker_settings()
 
         self._log("GUI ready. The GUI only talks over ROS -- closing it never "
                   "stops a running calibration.")
@@ -181,6 +204,26 @@ class HandeyeGuiWidget(QWidget):
         w = QWidget()
         lay = QVBoxLayout(w)
 
+        # ---- CAN / robot link ----
+        # First thing that goes wrong on a fresh boot is the CAN link, and it is
+        # invisible from the rest of the GUI: with no link every pose just fails
+        # safety validation with "robot not connected". Surface it explicitly.
+        canbox = QGroupBox("로봇 연결 (CAN)")
+        cg = QGridLayout(canbox)
+        self.lbl_can_link = QLabel("링크: 확인 중...")
+        self.lbl_can_arm = QLabel("팔: 확인 중...")
+        self.lbl_can_link.setStyleSheet("font-family:monospace;")
+        self.lbl_can_arm.setStyleSheet("font-family:monospace;")
+        self.btn_can = QPushButton("CAN 연결")
+        self.btn_can.setStyleSheet(
+            "background:#00695c;color:#fff;font-weight:bold;padding:8px;")
+        self.btn_can_refresh = QPushButton("상태 확인")
+        cg.addWidget(self.lbl_can_link, 0, 0, 1, 2)
+        cg.addWidget(self.lbl_can_arm, 1, 0, 1, 2)
+        cg.addWidget(self.btn_can, 2, 0)
+        cg.addWidget(self.btn_can_refresh, 2, 1)
+        lay.addWidget(canbox)
+
         # ---- settings ----
         cfg = QGroupBox("Calibration settings")
         g = QGridLayout(cfg)
@@ -192,7 +235,7 @@ class HandeyeGuiWidget(QWidget):
         self.spn_settle = QDoubleSpinBox()
         self.spn_settle.setRange(0.0, 10.0)
         self.spn_settle.setSingleStep(0.1)
-        self.spn_settle.setValue(1.0)
+        self.spn_settle.setValue(0.7)
         self.spn_settle.setSuffix(" s")
         self.spn_obs = QSpinBox()
         self.spn_obs.setRange(1, 50)
@@ -201,16 +244,43 @@ class HandeyeGuiWidget(QWidget):
         self.chk_auto.setChecked(True)
         self.chk_save = QCheckBox("성공 시 자동 저장")
         self.chk_save.setChecked(True)
-        g.addWidget(QLabel("Method"), 0, 0)
-        g.addWidget(self.cmb_method, 0, 1)
-        g.addWidget(QLabel("Target samples"), 1, 0)
-        g.addWidget(self.spn_samples, 1, 1)
-        g.addWidget(QLabel("Settle time"), 2, 0)
-        g.addWidget(self.spn_settle, 2, 1)
-        g.addWidget(QLabel("Obs / pose"), 3, 0)
-        g.addWidget(self.spn_obs, 3, 1)
-        g.addWidget(self.chk_auto, 4, 0, 1, 2)
-        g.addWidget(self.chk_save, 5, 0, 1, 2)
+        # Calibration target: single ArUco marker (default) or a ChArUco board.
+        # Switching pushes target_type to the detector at runtime.
+        self.cmb_target = QComboBox()
+        self.cmb_target.addItems(["ArUco 마커", "ChArUco 보드"])
+        # ArUco marker identity: which ID to track and its printed side length.
+        # marker_length scales every camera_T_target translation, so it must
+        # match the PHYSICAL marker (measure it!) -- editable here and pushed
+        # to the detector with the 적용 button.
+        self.spn_marker_id = QSpinBox()
+        self.spn_marker_id.setRange(0, 249)
+        self.spn_marker_id.setValue(1)
+        self.spn_marker_len = QDoubleSpinBox()
+        self.spn_marker_len.setRange(5.0, 500.0)
+        self.spn_marker_len.setDecimals(1)
+        self.spn_marker_len.setSingleStep(1.0)
+        self.spn_marker_len.setValue(70.0)
+        self.spn_marker_len.setSuffix(" mm")
+        self.btn_marker_apply = QPushButton("마커 설정 적용")
+        self.btn_marker_apply.setStyleSheet(
+            "background:#37474f;color:#fff;padding:4px;")
+        g.addWidget(QLabel("Target"), 0, 0)
+        g.addWidget(self.cmb_target, 0, 1)
+        g.addWidget(QLabel("Marker ID"), 1, 0)
+        g.addWidget(self.spn_marker_id, 1, 1)
+        g.addWidget(QLabel("Marker size"), 2, 0)
+        g.addWidget(self.spn_marker_len, 2, 1)
+        g.addWidget(self.btn_marker_apply, 3, 0, 1, 2)
+        g.addWidget(QLabel("Method"), 4, 0)
+        g.addWidget(self.cmb_method, 4, 1)
+        g.addWidget(QLabel("Target samples"), 5, 0)
+        g.addWidget(self.spn_samples, 5, 1)
+        g.addWidget(QLabel("Settle time"), 6, 0)
+        g.addWidget(self.spn_settle, 6, 1)
+        g.addWidget(QLabel("Obs / pose"), 7, 0)
+        g.addWidget(self.spn_obs, 7, 1)
+        g.addWidget(self.chk_auto, 8, 0, 1, 2)
+        g.addWidget(self.chk_save, 9, 0, 1, 2)
         lay.addWidget(cfg)
 
         # ---- progress ----
@@ -295,6 +365,16 @@ class HandeyeGuiWidget(QWidget):
         self.btn_save.clicked.connect(self._save)
         self.btn_load.clicked.connect(self._load)
         self.btn_pub.clicked.connect(self._publish_tf)
+        self.btn_can.clicked.connect(self._can_connect)
+        self.btn_can_refresh.clicked.connect(self._refresh_can)
+        self.sig_can.connect(self._on_can_result)
+        self.cmb_target.currentIndexChanged.connect(self._set_target_type)
+        self.btn_marker_apply.clicked.connect(self._apply_marker_settings)
+        # ID/size only describe the single-marker target; grey them out in board mode
+        self.cmb_target.currentIndexChanged.connect(
+            lambda i: (self.spn_marker_id.setEnabled(i == 0),
+                       self.spn_marker_len.setEnabled(i == 0),
+                       self.btn_marker_apply.setEnabled(i == 0)))
 
     def _setup_ros(self):
         n = self._node
@@ -322,6 +402,14 @@ class HandeyeGuiWidget(QWidget):
             "pub_tf": n.create_client(PublishCalibrationTf, "publish_calibration_tf"),
             "params": n.create_client(GetParameters,
                                       "/piper_control_node/get_parameters"),
+            # The arm driver owns the CAN port name; ask it rather than guessing.
+            "driver_params": n.create_client(
+                GetParameters, "/agx_arm_ctrl_single_node/get_parameters"),
+            # target-type / marker settings on the detector
+            "det_set": n.create_client(
+                SetParameters, "/aruco_detector_node/set_parameters"),
+            "det_get": n.create_client(
+                GetParameters, "/aruco_detector_node/get_parameters"),
         }
 
     # ------------------------------------------------------------------ #
@@ -345,6 +433,7 @@ class HandeyeGuiWidget(QWidget):
                 f"r={msg.rotation_rms_deg:.3f}°")
 
     def _on_robot(self, msg):
+        self._arm_connected = bool(msg.connected)
         parts = [
             _ok_label("connected" if msg.connected else "disconnected", msg.connected),
             _ok_label("enabled" if msg.enabled else "disabled", msg.enabled),
@@ -589,6 +678,231 @@ class HandeyeGuiWidget(QWidget):
         fut.add_done_callback(done)
 
     # ------------------------------------------------------------------ #
+    # CAN link
+    # ------------------------------------------------------------------ #
+    def _query_can_port(self):
+        """Ask the arm driver which socketcan interface it opened.
+
+        The driver is the authority -- hardcoding a name here would silently
+        report on the wrong interface on a two-arm rig.
+        """
+        if self._closing or not rclpy.ok():
+            return
+        cli = self._srv["driver_params"]
+        try:
+            if not cli.service_is_ready():
+                return
+            req = GetParameters.Request()
+            req.names = ["can_port"]
+            fut = cli.call_async(req)
+        except Exception:  # noqa: BLE001
+            return
+
+        def done(f):
+            try:
+                values = f.result().values
+            except Exception:  # noqa: BLE001
+                return
+            if values and values[0].type == 4 and values[0].string_value:  # STRING
+                self._can_port = values[0].string_value
+
+        fut.add_done_callback(done)
+
+    def _can_link_state(self):
+        """(state, bitrate) of the socketcan interface. Read-only, no sudo."""
+        import subprocess
+        try:
+            brief = subprocess.run(["ip", "-br", "link", "show", self._can_port],
+                                   capture_output=True, text=True, timeout=2)
+            if brief.returncode != 0 or not brief.stdout.split():
+                return "NOT FOUND", None
+            state = brief.stdout.split()[1]
+            detail = subprocess.run(["ip", "-d", "link", "show", self._can_port],
+                                    capture_output=True, text=True, timeout=2)
+            words = detail.stdout.split()
+            bitrate = words[words.index("bitrate") + 1] if "bitrate" in words else None
+            return state, bitrate
+        except Exception as exc:  # noqa: BLE001
+            return f"ERROR: {exc}", None
+
+    def _refresh_can(self):
+        if self._closing:
+            return
+        if not self._can_port or self._can_port == "can_follower":
+            self._query_can_port()      # keep trying until the driver answers
+
+        state, bitrate = self._can_link_state()
+        up = (state == "UP")
+        rate_ok = (bitrate == "1000000")
+        if up and rate_ok:
+            self.lbl_can_link.setText(f"링크: ● {self._can_port} UP (1 Mbit/s)")
+            self.lbl_can_link.setStyleSheet("font-family:monospace;color:#2e7d32;")
+        elif up:
+            self.lbl_can_link.setText(f"링크: ▲ {self._can_port} UP, bitrate={bitrate} (1000000 이어야 함)")
+            self.lbl_can_link.setStyleSheet("font-family:monospace;color:#ef6c00;")
+        else:
+            self.lbl_can_link.setText(f"링크: ○ {self._can_port} {state}")
+            self.lbl_can_link.setStyleSheet("font-family:monospace;color:#b71c1c;")
+
+        # The link being up says nothing about the arm being powered on, so
+        # report the driver's view separately.
+        if self._arm_connected:
+            self.lbl_can_arm.setText("팔: ● 피드백 수신 중")
+            self.lbl_can_arm.setStyleSheet("font-family:monospace;color:#2e7d32;")
+        else:
+            self.lbl_can_arm.setText("팔: ○ 피드백 없음 (전원/케이블 확인)")
+            self.lbl_can_arm.setStyleSheet("font-family:monospace;color:#b71c1c;")
+
+        self.btn_can.setEnabled(not self._can_busy and not (up and rate_ok))
+        self.btn_can.setText("CAN 연결됨" if (up and rate_ok) else "CAN 연결")
+
+    def _can_connect(self):
+        """Bring the socketcan link up.
+
+        `ip link set` needs root, and an rqt plugin has no terminal to prompt
+        in, so go through pkexec for a graphical prompt. If pkexec is missing
+        (headless / minimal install) print the exact command instead of failing
+        silently -- the user can always run can_setup.sh themselves.
+        """
+        import shutil
+        import subprocess
+        import threading
+
+        if self._can_busy:
+            return
+        script = self._can_setup_script()
+        if script is None:
+            self._log("ERROR: can_setup.sh를 찾을 수 없습니다. "
+                      "piper_auto_handeye 패키지가 빌드되었는지 확인하세요.")
+            return
+        if shutil.which("pkexec") is None:
+            self._log("pkexec가 없어 GUI에서 권한 상승을 할 수 없습니다. 터미널에서 실행하세요:")
+            self._log(f"  bash {script} {self._can_port}")
+            return
+
+        self._can_busy = True
+        self.btn_can.setEnabled(False)
+        self.btn_can.setText("연결 중...")
+        self._log(f"CAN 연결 시도: {script} {self._can_port} (관리자 권한 요청)")
+
+        def work():
+            try:
+                r = subprocess.run(["pkexec", "bash", script, self._can_port],
+                                   capture_output=True, text=True, timeout=60)
+                out = (r.stdout + r.stderr).strip()
+                self.sig_can.emit(r.returncode == 0, out[-800:])
+            except Exception as exc:  # noqa: BLE001
+                self.sig_can.emit(False, str(exc))
+
+        threading.Thread(target=work, daemon=True, name="can_setup").start()
+
+    def _can_setup_script(self):
+        """Path to can_setup.sh, from the installed package share."""
+        try:
+            from ament_index_python.packages import get_package_share_directory
+            path = os.path.join(get_package_share_directory("piper_auto_handeye"),
+                                "scripts", "can_setup.sh")
+            return path if os.path.exists(path) else None
+        except Exception:  # noqa: BLE001
+            return None
+
+    def _apply_marker_settings(self):
+        """Push marker ID + physical size to the detector.
+
+        The size is entered in mm (what a ruler reads); the detector parameter
+        is metres. Applied together so a half-updated pair never goes live.
+        """
+        mid = int(self.spn_marker_id.value())
+        length_m = float(self.spn_marker_len.value()) / 1000.0
+        cli = self._srv["det_set"]
+        if not cli.service_is_ready():
+            self._log("FAIL: 검출기 파라미터 서비스에 연결할 수 없음 (마커 설정)")
+            return
+        req = SetParameters.Request()
+        req.parameters = [
+            Parameter("target_marker_id", Parameter.Type.INTEGER,
+                      mid).to_parameter_msg(),
+            Parameter("marker_length", Parameter.Type.DOUBLE,
+                      length_m).to_parameter_msg(),
+        ]
+        fut = cli.call_async(req)
+
+        def done(f):
+            try:
+                results = f.result().results
+            except Exception as exc:  # noqa: BLE001
+                self.sig_log.emit(f"FAIL: 마커 설정 적용 실패: {exc}")
+                return
+            bad = [r.reason for r in results if not r.successful]
+            if bad:
+                self.sig_log.emit(f"FAIL: 마커 설정 거부됨: {'; '.join(bad)}")
+            else:
+                self.sig_log.emit(
+                    f"OK: 마커 설정 적용 -> ID {mid}, {length_m * 1000:.1f} mm")
+
+        fut.add_done_callback(done)
+
+    def _query_marker_settings(self):
+        """Populate the ID/size fields from the detector's live values, once."""
+        if self._closing or not rclpy.ok() or self._marker_cfg_loaded:
+            return
+        cli = self._srv["det_get"]
+        try:
+            if not cli.service_is_ready():
+                return
+            req = GetParameters.Request()
+            req.names = ["target_marker_id", "marker_length"]
+            fut = cli.call_async(req)
+        except Exception:  # noqa: BLE001
+            return
+
+        def done(f):
+            try:
+                vals = f.result().values
+            except Exception:  # noqa: BLE001
+                return
+            if len(vals) == 2 and vals[0].type == 2 and vals[1].type == 3:
+                self._marker_cfg_loaded = True
+                self.spn_marker_id.setValue(int(vals[0].integer_value))
+                self.spn_marker_len.setValue(float(vals[1].double_value) * 1000.0)
+
+        fut.add_done_callback(done)
+
+    def _set_target_type(self, index):
+        """Push the chosen target type (aruco/charuco) to the detector."""
+        value = "charuco" if index == 1 else "aruco"
+        cli = self._srv["det_set"]
+        if not cli.service_is_ready():
+            self._log(f"FAIL: 검출기 파라미터 서비스에 연결할 수 없음 (target={value})")
+            return
+        req = SetParameters.Request()
+        req.parameters = [Parameter("target_type", Parameter.Type.STRING,
+                                    value).to_parameter_msg()]
+        fut = cli.call_async(req)
+
+        def done(f):
+            try:
+                r = f.result().results[0]
+            except Exception as exc:  # noqa: BLE001
+                self.sig_log.emit(f"FAIL: target_type 변경 실패: {exc}")
+                return
+            if r.successful:
+                self.sig_log.emit(f"OK: 캘리브레이션 타겟 -> {value}")
+            else:
+                self.sig_log.emit(f"FAIL: target_type 거부됨: {r.reason}")
+
+        fut.add_done_callback(done)
+
+    def _on_can_result(self, ok, message):
+        self._can_busy = False
+        for line in (message or "").splitlines():
+            if line.strip():
+                self._log(("  " if ok else "  ! ") + line)
+        self._log("OK: CAN 링크 활성화" if ok
+                  else "FAIL: CAN 링크 활성화 실패 (위 로그 확인)")
+        self._refresh_can()
+
+    # ------------------------------------------------------------------ #
     # helpers
     # ------------------------------------------------------------------ #
     @staticmethod
@@ -663,6 +977,7 @@ class HandeyeGuiWidget(QWidget):
 
     def shutdown(self):
         self._live_timer.stop()
+        self._can_timer.stop()
         for sub in self._subs:
             self._node.destroy_subscription(sub)
         self._subs = []

@@ -1,8 +1,11 @@
-"""Full bringup: (RealSense) + detector + Piper control + manager + TF + (GUI).
+"""Full bringup: (RealSense) + detector + arm control + manager + TF + (GUI).
 
-Does NOT launch the low-level Piper driver (piper_ctrl_single_node) -- start that
-separately (it opens the CAN bus). Use use_mock_robot:=true to run without the
-real driver/hardware.
+Does NOT launch the low-level arm driver (agx_arm_ctrl) -- start that separately
+(it opens the CAN bus), or use real_calibration.launch.py which brings up
+everything at once.
+
+With use_mock_robot:=true you must also pass control_backend:=topic --
+mock_robot_node emulates the old /pos_cmd interface, not agx_arm_ctrl's.
 """
 import os
 
@@ -50,7 +53,9 @@ def generate_launch_description():
     control = Node(
         package="piper_auto_handeye", executable="piper_control_node",
         name="piper_control_node",
-        parameters=[piper_cfg, {"dry_run": dry_run}], output="screen")
+        parameters=[piper_cfg, {"dry_run": dry_run,
+                                "control_backend": LaunchConfiguration("control_backend")}],
+        output="screen")
 
     manager = Node(
         package="piper_auto_handeye", executable="handeye_calibration_node",
@@ -76,5 +81,8 @@ def generate_launch_description():
         DeclareLaunchArgument("dry_run", default_value="true",
                               description="SAFETY: true = never command the robot"),
         DeclareLaunchArgument("namespace", default_value=""),
+        DeclareLaunchArgument("control_backend", default_value="agx",
+                              description="agx = real robot via agx_arm_ctrl | "
+                                          "topic = required with use_mock_robot:=true"),
         realsense, detector, mock, control, manager, tf_pub, gui,
     ])

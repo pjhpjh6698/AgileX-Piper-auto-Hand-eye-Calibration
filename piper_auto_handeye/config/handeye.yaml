@@ -14,13 +14,84 @@
     target_frame: calibration_target
 
     # Timing / collection
-    settle_time: 1.0                  # s to wait after motion stops
+    # s to wait after motion stops before collecting. The control node already
+    # requires 0.35 s of verified stillness to declare arrival, so this only
+    # needs to cover residual vibration -- 0.7 is plenty for the Piper.
+    settle_time: 0.7
     observations_per_pose: 10         # marker frames averaged per pose
     marker_timeout: 5.0               # s to wait for a valid marker per pose
     marker_stability_min: 0.6         # min PoseFilter stability score to accept
     maximum_pose_time_difference: 0.2 # s between robot pose and marker pose
-    minimum_rotation_difference_deg: 5.0   # reject near-duplicate orientations
+    # 0 = duplicate-orientation gate OFF. Redundant poses are deliberately
+    # welcome ("비슷해보여도 여러 자세를 많이 수집하는 것이 오히려 안정적이다");
+    # with the gate at 5.0 the ㄹ sweep -- whose stops share aiming geometry --
+    # lost most of its samples as "too close" and runs died at ~6/10 samples.
+    minimum_rotation_difference_deg: 0.0
     on_marker_timeout: skip           # skip | fail
+
+    # ---- Marker recovery -------------------------------------------------
+    # Eye-in-hand means the gripper sits between the camera and the world, so at
+    # some poses it simply covers the marker. Skipping those poses quietly
+    # removes exactly the orientations that make the solve well-conditioned, so
+    # instead the wrist is nudged until the marker is visible and the sample is
+    # taken there. That stays valid: the solver consumes the
+    # (base_T_gripper, camera_T_target) PAIR, not any particular commanded pose.
+    #
+    # Two failures are handled differently:
+    #   marker NEVER seen      -> occluded  -> reposition the wrist
+    #   marker seen but noisy  -> unstable  -> stay put, retry with a longer window
+    marker_recovery_enabled: true
+    marker_recovery_max_attempts: 5        # repositions tried before giving up on a pose
+    marker_recovery_translation_step: 0.05 # m, standoff added per recovery step
+    marker_recovery_rotation_step_deg: 12.0  # deg, wrist yaw/pitch per recovery step
+    marker_recovery_min_sightings: 3       # detected frames needed to call it "visible"
+
+    # Persistence when the marker IS visible but the detector is jittery.
+    # Each retry widens the window by marker_retry_timeout_growth, so the
+    # effective wait is marker_timeout * (1 + g + g^2 + ...).
+    marker_retry_in_place: 3
+    marker_retry_timeout_growth: 1.5
+    marker_recovery_joint_step_deg: 8.0    # wrist-joint nudge per recovery step
+
+    # ---- Down-looking home ------------------------------------------------
+    # TAUGHT configuration: the leader arm on can_master was posed by hand at
+    # the desired viewing angle and its joints read back (2026-07-27). Flange
+    # lands at (0.203, -0.006, 0.323), tilted 22 deg from vertical. Only j5 was
+    # pulled from 68.8 to 66.0 deg -- the demonstrated value sat 1.2 deg from
+    # the joint's 70 deg stop, which the safety gate (2 deg margin) would
+    # refuse and which leaves no headroom for wrist-nudge marker recovery.
+    #
+    # The arm moves here at launch, at every Start, at the end of every run,
+    # and on Reset. Place the marker where the camera looks from this pose.
+    home_joints: [-0.0580, 1.1419, -1.0121, 0.0680, 1.1519, -0.1193]
+    # One PLAIN move to home_joints at launch (no marker search, no alignment).
+    startup_home: true
+
+    # ---- ㄹ sweep: marker-aiming lattice ---------------------------------
+    # The motion, as specified: from home, step LEFT and take a pose looking
+    # at the marker; step right and look again; continue past home, one more
+    # step right; then shift along base -y and repeat the same left-to-right
+    # pass. Every stop AIMS the flange axis at the same point -- the spot the
+    # HOME pose looks at, aim_distance along its viewing axis -- so the sweep
+    # orbits the marker like a hand-held calibration video.
+    #   * rotation maximised: different stops aim from different directions,
+    #     and each stop is shot twice, twisted +-serp_twist_deg about the
+    #     aiming axis (pure rotation; the marker stays centred)
+    #   * translation minimised: lattice steps are a few cm
+    #   * redundancy welcomed: duplicate gate is off (see above)
+    # Targets are solved to joints against the arm's own kinematics (IK seeded
+    # stop-to-stop); unreachable stops are dropped, not approximated. Falls
+    # back to calibration_poses.yaml when off or too few stops survive.
+    auto_generate_poses: true
+    serp_rows: 3                      # left-to-right passes
+    serp_cols: 4                      # stops per pass
+    serp_col_step: 0.035              # m between stops along x
+    serp_row_step: 0.03               # m between passes along -y
+    serp_twist_deg: 25.0              # per-stop twist about the aiming axis
+    serp_orientations_per_stop: 2     # poses per stop (1..3)
+    aim_distance: 0.25                # m from home flange to the aim point
+    # Aiming from lattice corners tilts the view; the cone must leave room.
+    gen_down_cone_deg: 45.0
 
     # Input topics (from the other nodes)
     marker_topic: marker_detection    # auto_handeye_interfaces/MarkerDetection

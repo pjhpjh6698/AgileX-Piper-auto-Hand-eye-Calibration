@@ -15,7 +15,10 @@ setup(
         ("share/" + package_name, ["package.xml"]),
         (os.path.join("share", package_name, "config"), glob("config/*.yaml")),
         (os.path.join("share", package_name, "launch"), glob("launch/*.launch.py")),
+        (os.path.join("share", package_name, "scripts"), glob("scripts/*.sh")),
     ],
+    # also into lib/<pkg> so `ros2 run piper_auto_handeye can_setup.sh` works
+    scripts=glob("scripts/*.sh"),
     install_requires=["setuptools"],
     zip_safe=True,
     maintainer="jh",
@@ -27,6 +30,8 @@ setup(
         "console_scripts": [
             "aruco_detector_node = piper_auto_handeye.aruco_detector_node:main",
             "piper_control_node = piper_auto_handeye.piper_control_node:main",
+            "agx_arm_check = piper_auto_handeye.agx_arm_check:main",
+            "generate_poses = piper_auto_handeye.generate_poses:main",
             "handeye_calibration_node = piper_auto_handeye.handeye_calibration_node:main",
             "calibration_tf_publisher_node = piper_auto_handeye.calibration_tf_publisher_node:main",
             "mock_robot_node = piper_auto_handeye.mock_robot_node:main",

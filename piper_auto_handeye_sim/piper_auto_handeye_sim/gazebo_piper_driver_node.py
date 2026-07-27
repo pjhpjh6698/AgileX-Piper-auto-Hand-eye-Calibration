@@ -1,10 +1,15 @@
 #!/usr/bin/env python3
-"""Gazebo stand-in for the real Piper CAN driver (``piper_ctrl_single_node``).
+"""Gazebo stand-in for a real Piper CAN driver.
 
 Same trick as ``mock_robot_node``, but backed by real physics: it speaks the
-EXACT topic interface the real driver exposes, so ``piper_control_node`` and the
-whole calibration stack run **completely unchanged**. What you verify in Gazebo
-is therefore the same code path that runs on hardware.
+older AgileX ``/pos_cmd`` topic interface, which is ``piper_control_node``'s
+``topic`` backend. The sim config selects that backend, so everything above the
+driver -- the action server, the safety validator, the calibration manager --
+is the same code that runs on hardware.
+
+Only the bottom layer differs: on the real arm ``piper_control_node`` runs the
+``agx`` backend against ``agx_arm_ctrl``, which exposes ``control/move_p`` and
+``feedback/tcp_pose`` instead. Both feed the same internal state machine.
 
   subscribes  /joint_states   (from joint_state_broadcaster)  -> FK -> pose
               /pos_cmd        (piper_msgs/PosCmd, Cartesian)  -> IK -> trajectory

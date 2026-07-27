@@ -1,7 +1,8 @@
-"""Calibration core: Piper control adapter + calibration manager + TF publisher.
+"""Calibration core: arm control adapter + calibration manager + TF publisher.
 
-Assumes the ArUco detector and the REAL Piper driver (piper_ctrl_single_node)
-are already running (or use bringup.launch.py). dry_run defaults to true.
+Assumes the ArUco detector and the REAL arm driver (agx_arm_ctrl) are already
+running (or use bringup.launch.py / real_calibration.launch.py).
+dry_run defaults to true.
 """
 import os
 

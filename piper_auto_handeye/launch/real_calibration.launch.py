@@ -1,7 +1,7 @@
 """ONE-COMMAND real-robot Eye-in-Hand calibration (Piper + RealSense + GUI).
 
 Brings up everything needed:
-  - Piper driver (piper_ctrl_single_node, opens CAN)   [use_piper_driver]
+  - AgileX arm driver (agx_arm_ctrl, opens CAN)        [use_piper_driver]
   - RealSense camera                                   [use_realsense]
   - ArUco detector (publishes the GUI camera view)
   - Piper control adapter (safety-validated motion)
@@ -9,18 +9,34 @@ Brings up everything needed:
   - Static TF publisher
   - RQt GUI                                            [use_gui]
 
+The AgileX driver (agx_arm_ctrl) and its SDK (pyAgxArm) are both vendored in
+this workspace, so nothing outside `colcon build` is required. Bring the CAN
+link up and prove the arm answers BEFORE launching:
+
+  bash piper_auto_handeye/scripts/can_setup.sh can_follower
+  ros2 run piper_auto_handeye agx_arm_check --can-port can_follower
+
+The driver is launched with auto_enable:=false on purpose: nothing powers the
+joints until piper_control_node asks for it, immediately before a live move.
+
 ##########################  SAFETY  ##########################
-dry_run defaults to TRUE: nothing moves until you pass dry_run:=false.
-Before ever running with dry_run:=false you MUST verify that every pose in
-config/calibration_poses.yaml is reachable and collision-free for YOUR setup.
-Keep a hand on the e-stop. The GUI shows a red "LIVE" banner when motion is armed.
+THIS LAUNCH MOVES THE ROBOT. Pressing Start commands real motion.
+Verify that every pose in config/calibration_poses.yaml is reachable and
+collision-free for YOUR setup before the first run, and keep a hand on the
+e-stop. The GUI shows a red "LIVE" banner whenever motion is armed.
+
+What actually protects you at runtime, in piper.yaml:
+  workspace_min / workspace_max   Cartesian bounds; a goal outside is refused
+  max_step_distance               refuses a single move longer than this
+  max_speed_fraction              caps the speed pushed to the driver
+  STOP button                     holds the current pose immediately
 ##############################################################
 
 Typical use:
-  # 1) dry run first -- verifies poses, marker, and the whole pipeline, no motion
   ros2 launch piper_auto_handeye real_calibration.launch.py
-  # 2) only after the dry run is clean:
-  ros2 launch piper_auto_handeye real_calibration.launch.py dry_run:=false
+
+  # walk the pose list without commanding anything (validation only):
+  ros2 launch piper_auto_handeye real_calibration.launch.py dry_run:=true
 """
 import os
 
@@ -47,23 +63,46 @@ def generate_launch_description():
     use_gui = LaunchConfiguration("use_gui")
     dry_run = LaunchConfiguration("dry_run")
     can_port = LaunchConfiguration("can_port")
+    backend = LaunchConfiguration("control_backend")
     method = LaunchConfiguration("calibration_method")
+    wrist_serial = LaunchConfiguration("wrist_camera_serial")
 
-    # --- Piper low-level driver (opens the CAN bus) ---
+    # --- AgileX low-level driver (opens the CAN bus); vendored in this workspace ---
+    # auto_enable=false: the joints stay unpowered until piper_control_node
+    # explicitly enables them for a live move, so a dry run never energises the arm.
+    # speed_percent is a floor only -- piper_control_node overwrites it per goal.
     piper_driver = GroupAction(
         condition=IfCondition(use_piper_driver),
         actions=[IncludeLaunchDescription(
             PythonLaunchDescriptionSource(PathJoinSubstitution([
-                FindPackageShare("piper"), "launch", "start_single_piper.launch.py"])),
-            launch_arguments={"can_port": can_port, "auto_enable": "true"}.items())])
+                FindPackageShare("agx_arm_ctrl"), "launch",
+                "start_single_agx_arm.launch.py"])),
+            launch_arguments={"can_port": can_port,
+                              "arm_type": "piper",
+                              "auto_enable": "false",
+                              "speed_percent": "26"}.items())])
 
-    # --- RealSense ---
+    # --- RealSense (the WRIST camera) ---
+    # Two RealSense cameras are attached, so pin the eye-in-hand one by serial
+    # number: USB enumeration order is not stable across reboots and grabbing
+    # the wrong camera would silently calibrate against the wrong rigid body.
+    # realsense2_camera needs the serial with a leading underscore -- without it
+    # the value is parsed as an integer and the match fails.
+    # Depth is off: ArUco needs colour only, and two D455s on one controller can
+    # saturate USB bandwidth otherwise.
     realsense = GroupAction(
         condition=IfCondition(use_realsense),
         actions=[IncludeLaunchDescription(
             PythonLaunchDescriptionSource(PathJoinSubstitution([
                 FindPackageShare("realsense2_camera"), "launch", "rs_launch.py"])),
-            launch_arguments={"enable_color": "true",
+            launch_arguments={"serial_no": wrist_serial,
+                              "camera_namespace": "wrist",
+                              "camera_name": "camera",
+                              "enable_color": "true",
+                              "enable_depth": "false",
+                              "enable_infra1": "false",
+                              "enable_infra2": "false",
+                              "rgb_camera.color_profile": "1280,720,30",
                               "pointcloud.enable": "false"}.items())])
 
     detector = Node(
@@ -73,7 +112,10 @@ def generate_launch_description():
     control = Node(
         package="piper_auto_handeye", executable="piper_control_node",
         name="piper_control_node",
-        parameters=[piper_cfg, {"dry_run": dry_run}], output="screen")
+        # can_port is NOT passed here: the driver owns the bus, this node only
+        # talks to the driver over topics.
+        parameters=[piper_cfg, {"dry_run": dry_run,
+                                "control_backend": backend}], output="screen")
 
     manager = Node(
         package="piper_auto_handeye", executable="handeye_calibration_node",
@@ -98,15 +140,26 @@ def generate_launch_description():
         output="screen")])
 
     return LaunchDescription([
-        DeclareLaunchArgument("dry_run", default_value="true",
-                              description="SAFETY: true = validate only, robot never moves"),
+        DeclareLaunchArgument("dry_run", default_value="false",
+                              description="true = validate poses only, robot never moves. "
+                                          "Default false: this launch is the REAL-ROBOT "
+                                          "entry point and Start moves the arm."),
         DeclareLaunchArgument("use_gui", default_value="true"),
         DeclareLaunchArgument("use_realsense", default_value="true"),
-        DeclareLaunchArgument("use_piper_driver", default_value="true"),
-        DeclareLaunchArgument("can_port", default_value="can0"),
+        DeclareLaunchArgument("use_piper_driver", default_value="true",
+                              description="start the vendored AgileX agx_arm_ctrl driver"),
+        DeclareLaunchArgument("control_backend", default_value="agx",
+                              description="agx = via the AgileX driver (real robot) | "
+                                          "topic = /pos_cmd interface (simulation only)"),
+        DeclareLaunchArgument("can_port", default_value="can_follower",
+                              description="socketcan interface the arm is on"),
+        DeclareLaunchArgument("wrist_camera_serial", default_value="_338522300590",
+                              description="serial of the WRIST D455 (keep the leading "
+                                          "underscore; list with rs-enumerate-devices)"),
         DeclareLaunchArgument("calibration_method", default_value="TSAI",
                               description="TSAI (Tsai-Lenz) | PARK | HORAUD | ANDREFF | DANIILIDIS"),
         LogInfo(msg=["[SAFETY] dry_run=", dry_run,
-                     "  (true = no motion; pass dry_run:=false only after verifying poses)"]),
+                     "  (false = Start MOVES THE ROBOT; pass dry_run:=true to validate only)"]),
+        LogInfo(msg=["[ROBOT] backend=", backend, " can_port=", can_port]),
         piper_driver, realsense, detector, control, manager, tf_pub, gui,
     ])
