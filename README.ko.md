@@ -52,7 +52,7 @@ source install/setup.bash
 
 ## 사용법
 
-### 1. 타겟을 인쇄하고 실측한다
+### 1. 타겟을 인쇄하고 실측
 
 `DICT_4X4_50`의 ID 1번 ArUco 마커나 ChArUco 보드를 인쇄합니다. 그리고 인쇄물을
 자로 재서, 생성기에 입력한 값이 아니라 실제로 잰 값을 넣으세요.
@@ -74,7 +74,7 @@ ChArUco 보드는 한 칸을 재지 말고 전체 폭을 재서 나누세요.
 타겟은 모든 자세에서 카메라에 보이도록 작업 공간에 단단히 고정하고, 팔 앞쪽
 20~30cm 정도에 두세요.
 
-### 2. CAN을 올리고 팔이 응답하는지 확인한다
+### 2. CAN을 올리고 팔이 응답하는지 확인
 
 ```bash
 bash piper_auto_handeye/scripts/can_setup.sh          # 발견되는 모든 CAN 어댑터
@@ -92,7 +92,7 @@ launch 파일의 기본값은 이 프로젝트를 개발한 장비 기준이므�
 ros2 launch piper_auto_handeye real_calibration.launch.py can_port:=can0
 ```
 
-### 3. 캘리브레이션한다
+### 3. 캘리브레이션
 
 ```bash
 ros2 launch piper_auto_handeye real_calibration.launch.py
@@ -110,7 +110,7 @@ GUI에서: CAN 패널이 초록인지 확인 → 타겟 종류 선택 후 실측
 ros2 launch piper_auto_handeye real_calibration.launch.py dry_run:=true
 ```
 
-### 4. 결과를 확인한다
+### 4. 결과 확인
 
 Publish TF를 누르면 내장 RViz의 손목 위에 카메라 프레임이 나타납니다. 팔을
 움직여 보세요. 제대로 된 캘리브레이션은 카메라 프레임이 실제 카메라가 있는
