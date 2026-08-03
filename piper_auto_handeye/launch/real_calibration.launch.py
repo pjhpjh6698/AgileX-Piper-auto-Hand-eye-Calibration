@@ -7,14 +7,14 @@ Brings up everything needed:
   - Piper control adapter (safety-validated motion)
   - Hand-eye calibration manager (Tsai-Lenz by default)
   - Static TF publisher
-  - RQt GUI                                            [use_gui]
+  - RQt GUI                                            [use_gui, gui_lang]
 
 The AgileX driver (agx_arm_ctrl) and its SDK (pyAgxArm) are both vendored in
 this workspace, so nothing outside `colcon build` is required. Bring the CAN
 link up and prove the arm answers BEFORE launching:
 
-  bash piper_auto_handeye/scripts/can_setup.sh can_follower
-  ros2 run piper_auto_handeye agx_arm_check --can-port can_follower
+  bash piper_auto_handeye/scripts/can_setup.sh can0
+  ros2 run piper_auto_handeye agx_arm_check --can-port can0
 
 The driver is launched with auto_enable:=false on purpose: nothing powers the
 joints until piper_control_node asks for it, immediately before a live move.
@@ -46,8 +46,9 @@ from launch.actions import (DeclareLaunchArgument, IncludeLaunchDescription,
                             GroupAction, ExecuteProcess, TimerAction, LogInfo)
 from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
+from launch.substitutions import Command, LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 from launch_ros.substitutions import FindPackageShare
 
 
@@ -61,6 +62,7 @@ def generate_launch_description():
     use_realsense = LaunchConfiguration("use_realsense")
     use_piper_driver = LaunchConfiguration("use_piper_driver")
     use_gui = LaunchConfiguration("use_gui")
+    gui_lang = LaunchConfiguration("gui_lang")
     dry_run = LaunchConfiguration("dry_run")
     can_port = LaunchConfiguration("can_port")
     backend = LaunchConfiguration("control_backend")
@@ -82,14 +84,34 @@ def generate_launch_description():
                               "auto_enable": "false",
                               "speed_percent": "26"}.items())])
 
-    # --- RealSense (the WRIST camera) ---
-    # Two RealSense cameras are attached, so pin the eye-in-hand one by serial
-    # number: USB enumeration order is not stable across reboots and grabbing
-    # the wrong camera would silently calibrate against the wrong rigid body.
-    # realsense2_camera needs the serial with a leading underscore -- without it
-    # the value is parsed as an integer and the match fails.
-    # Depth is off: ArUco needs colour only, and two D455s on one controller can
-    # saturate USB bandwidth otherwise.
+    # --- robot model -> TF chain (for the GUI's embedded RViz) ---
+    # The WITH-GRIPPER model, matching what start_single_piper_rviz shows. The
+    # driver only reports joint1..6 (effector_type=none), so the bridge
+    # republishes them onto /joint_states with the gripper joints held at 0 --
+    # without that, the gripper links have no TF and RViz flags them in red.
+    # (Own node, not ros-humble-joint-state-publisher: that package is not
+    # installed everywhere and this workspace promises one colcon build.)
+    urdf = PathJoinSubstitution([
+        FindPackageShare("agx_arm_description"),
+        "agx_arm_urdf", "piper", "urdf", "piper_with_gripper_description.xacro"])
+    jsp = Node(
+        package="piper_auto_handeye", executable="joint_state_bridge_node",
+        name="joint_state_bridge", output="screen")
+    rsp = Node(
+        package="robot_state_publisher", executable="robot_state_publisher",
+        name="robot_state_publisher", output="screen",
+        parameters=[{"robot_description": ParameterValue(
+            Command(["xacro ", urdf]), value_type=str)}])
+
+    # --- RealSense (the wrist camera) ---
+    # An empty serial takes whichever camera is attached, which is what a
+    # single-camera rig wants. With more than one camera, pin the eye-in-hand
+    # one by serial: USB enumeration order is not stable across reboots and
+    # grabbing the wrong camera would silently calibrate against the wrong rigid
+    # body. realsense2_camera needs the serial with a leading underscore --
+    # without it the value is parsed as an integer and the match fails.
+    # Depth is off: ArUco needs colour only, and two D455s on one USB controller
+    # can saturate the bandwidth otherwise.
     realsense = GroupAction(
         condition=IfCondition(use_realsense),
         actions=[IncludeLaunchDescription(
@@ -133,10 +155,14 @@ def generate_launch_description():
     # GUI last, after the nodes it talks to are up.
     # NOTE: rqt identifies the plugin by its FULL class path, and caches plugin
     # discovery -- so a freshly built plugin needs --force-discover.
+    # gui_lang travels in the environment rather than as a ROS parameter: rqt
+    # constructs the plugin itself, so the widget has already built its labels
+    # before any parameter client could answer.
     gui = TimerAction(period=4.0, actions=[ExecuteProcess(
         condition=IfCondition(use_gui),
         cmd=["rqt", "--force-discover", "--standalone",
              "piper_auto_handeye_gui.handeye_gui_plugin.HandeyeGuiPlugin"],
+        additional_env={"HANDEYE_GUI_LANG": gui_lang},
         output="screen")])
 
     return LaunchDescription([
@@ -145,21 +171,27 @@ def generate_launch_description():
                                           "Default false: this launch is the REAL-ROBOT "
                                           "entry point and Start moves the arm."),
         DeclareLaunchArgument("use_gui", default_value="true"),
+        DeclareLaunchArgument("gui_lang", default_value="ko",
+                              description="GUI language: ko (default) | en"),
         DeclareLaunchArgument("use_realsense", default_value="true"),
         DeclareLaunchArgument("use_piper_driver", default_value="true",
                               description="start the vendored AgileX agx_arm_ctrl driver"),
         DeclareLaunchArgument("control_backend", default_value="agx",
                               description="agx = via the AgileX driver (real robot) | "
                                           "topic = /pos_cmd interface (simulation only)"),
-        DeclareLaunchArgument("can_port", default_value="can_follower",
-                              description="socketcan interface the arm is on"),
-        DeclareLaunchArgument("wrist_camera_serial", default_value="_338522300590",
-                              description="serial of the WRIST D455 (keep the leading "
-                                          "underscore; list with rs-enumerate-devices)"),
+        DeclareLaunchArgument("can_port", default_value="can0",
+                              description="socketcan interface the arm is on "
+                                          "(see `ip -br link show type can`)"),
+        DeclareLaunchArgument("wrist_camera_serial", default_value="",
+                              description="serial of the wrist camera; empty = use the "
+                                          "only camera attached. With more than one "
+                                          "camera, pin it: keep the leading underscore "
+                                          "(_123456789012) and list serials with "
+                                          "rs-enumerate-devices -s"),
         DeclareLaunchArgument("calibration_method", default_value="TSAI",
                               description="TSAI (Tsai-Lenz) | PARK | HORAUD | ANDREFF | DANIILIDIS"),
         LogInfo(msg=["[SAFETY] dry_run=", dry_run,
                      "  (false = Start MOVES THE ROBOT; pass dry_run:=true to validate only)"]),
         LogInfo(msg=["[ROBOT] backend=", backend, " can_port=", can_port]),
-        piper_driver, realsense, detector, control, manager, tf_pub, gui,
+        piper_driver, jsp, rsp, realsense, detector, control, manager, tf_pub, gui,
     ])

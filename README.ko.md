@@ -1,370 +1,263 @@
-# Piper 자동 Hand-Eye 캘리브레이션 (Eye-in-Hand, ArUco)
+# AgileX Piper 자동 Hand-Eye 캘리브레이션
 
-**AgileX Piper** 로봇 팔과 엔드이펙터에 장착된 **Intel RealSense** 카메라를 이용해
-고정된 **ArUco** 마커를 관측하는 **Eye-in-Hand** 방식의 자동 hand-eye 캘리브레이션
-시스템입니다. 로봇을 여러 자세로 자동으로 이동시키며
-`(base_T_gripper, camera_T_target)` 쌍을 수집하고, OpenCV의
-`calibrateHandEye()`를 이용해 `gripper_T_camera`를 계산합니다.
+손목에 RealSense 카메라를 단 AgileX Piper 팔을 위한 자동 eye-in-hand
+캘리브레이션입니다. Start를 누르면 팔이 스스로 여러 자세를 돌며 고정된 마커를
+관측하고, 그리퍼 기준 카메라 위치를 계산합니다. 손으로 팔을 옮기거나 자세를
+받아적을 필요가 없습니다.
 
-> **상태:** MVP — 고정된 단일 ArUco 마커 타겟만 지원합니다. ChArUco/GridBoard는
-> 확장 지점으로 문서화되어 있으나(`aruco_detector_node` 참고) 아직 구현되지
-> 않았습니다.
+English documentation: [README.md](README.md)
 
----
+## 특징
 
-## 1. 이 프로젝트가 하는 일
+- launch 파일 하나로 팔, 카메라, 검출기, 솔버, GUI, RViz가 모두 뜹니다.
+- 팔이 자세 스위프를 스스로 계획하고 이동합니다. 사용자는 Start만 누릅니다.
+- ArUco 마커와 ChArUco 보드를 지원하며, 실행 중 GUI에서 전환합니다.
+- 실시간 결과: 샘플이 하나 수락될 때마다 다시 풀어서 화면에 갱신합니다.
+- 그리퍼가 마커를 가리면 자동으로 복구합니다.
+- OpenCV 기반 솔버 5종(Tsai-Lenz, Park, Horaud, Andreff, Daniilidis).
+- 한국어/영어 GUI.
+- 로봇에 필요한 것이 전부 벤더링되어 있어 새 컴퓨터에서도 `colcon build` 하나면 끝납니다.
 
-- 카메라는 **로봇 플랜지(`link6`)에 고정**되어 있고, ArUco 마커는 **작업 공간에
-  고정**되어 있습니다. 이것이 *Eye-in-Hand* 구성입니다.
-- 로봇이 **완전히 정지했을 때만** 샘플을 수집하며, 자세마다 여러 프레임의 마커
-  관측값을 평균 내고, 잘못된 검출은 걸러낸 뒤 계산을 수행하고, 폐루프
-  타겟-일관성 검사로 결과를 **검증**합니다.
-- 결과를 **정적 TF** `link6 → camera_color_optical_frame`로 퍼블리시합니다.
-- 목(mock) 로봇과 합성(synthetic) 마커를 이용해 **하드웨어 없이도** 동작하며,
-  알려진 변환값을 정확히 복원할 수 있습니다.
+## 동작 방식: eye-in-hand
 
-모든 위치는 **미터(m)** 단위이며, 회전은 내부적으로 모두 **회전 행렬 / 쿼터니언**
-으로 처리됩니다. 오일러 각은 **GUI/로그 표시용으로만** 사용됩니다.
+카메라는 플랜지에 고정되어 팔과 함께 움직이고, 마커는 작업 공간에 가만히
+있습니다. 구하려는 값은 플랜지에서 카메라까지의 고정 변환
+`gripper_T_camera`입니다.
 
----
+각 자세마다 팔이 보고하는 플랜지 위치(`base_T_gripper`)와 카메라가 보는 마커
+위치(`camera_T_target`)를 기록합니다. 마커가 움직이지 않는다는 것만으로 카메라
+장착 위치를 풀기에 충분하며, 마커 자신의 위치는 수식에서 상쇄되므로 측정할
+필요가 없습니다.
 
-## 2. 패키지 구성
+표기: `A_T_B`는 "A 기준으로 표현된 B"이며 `p_A = A_T_B @ p_B`입니다.
 
-| 패키지 | 타입 | 내용 |
-|---|---|---|
-| `auto_handeye_interfaces` | ament_cmake | 메시지(`MarkerDetection`, `RobotState`, `CalibrationStatus`), 서비스(`ResetCalibration`, `SaveCalibration`, `LoadCalibration`, `PublishCalibrationTf`, `AddManualSample`), 액션(`RunCalibration`, `MoveToCalibrationPose`) |
-| `piper_auto_handeye` | ament_python | 전체 노드 + ROS 비의존 수학 코어 + 설정 + launch + 테스트 |
-| `piper_auto_handeye_gui` | ament_python | rqt GUI 플러그인 |
-| `piper_auto_handeye_sim` | ament_python | Gazebo 검증 리그 |
-| `agx_arm_ctrl`, `agx_arm_msgs` | 벤더링 | AgileX ROS 2 로봇팔 드라이버 — `agx_arm_ctrl/VENDOR.md` 참조 |
-| `pyagxarm_vendor` | 벤더링 | AgileX `pyAgxArm` SDK — `pyagxarm_vendor/VENDOR.md` 참조 |
-| `piper_msgs` | 벤더링 | 구버전 `/pos_cmd` 메시지. mock/Gazebo 경로 전용 |
+## 설치
 
-실기 구동에 필요한 것은 전부 벤더링되어 있어, 새 컴퓨터에서도 `colcon build`
-하나면 끝납니다.
-
-### 노드
-- `aruco_detector_node` — 타겟 마커를 검출하고 `camera_T_target`을 퍼블리시합니다.
-- `piper_control_node` — 로봇팔 드라이버에 대한 **어댑터**로, `RobotState`를
-  퍼블리시하고 안전 검증이 적용된 `MoveToCalibrationPose` 액션을 제공합니다.
-- `handeye_calibration_node` — 상태 머신 + `RunCalibration` 액션 + 서비스들.
-- `calibration_tf_publisher_node` — 계산된 정적 결과 TF를 브로드캐스트합니다.
-- `agx_arm_check` — 읽기 전용 CAN/SDK 사전 점검 도구(노드가 아닌 CLI).
-- `mock_robot_node` — 하드웨어 없는 테스트를 위해 구버전 드라이버 토픽을
-  에뮬레이션합니다.
-- `synthetic_marker_publisher_node` — 카메라 없이 테스트할 수 있는 마커
-  더블(알려진 정답값으로부터 `camera_T_target`을 생성).
-
-### ROS 비의존 코어 (단위 테스트 가능, 순수 numpy)
-`transform_utils.py`, `calibration_solver.py`, `calibration_validator.py`,
-`pose_filter.py`, `safety_validator.py`, `calibration_io.py`.
-
----
-
-## 3. 설계 결정: 벤더 드라이버를 재사용하고 SDK를 다시 감싸지 않는다
-
-`piper_control_node`는 CAN 버스를 직접 열지 않습니다. 버스를 소유하는 것은
-`pyAgxArm` 위에 올라간 AgileX ROS 2 드라이버 `agx_arm_ctrl`(여기에 벤더링됨)이고,
-컨트롤 노드는 그 위에서만 말을 겁니다. 덕분에 캘리브레이션 정책(안전 한계, 목표
-검증, 도달 판정, 액션 서버)이 "팔에 어떻게 닿는지"와 무관한 한 곳에 모이고,
-그래서 mock과 Gazebo 리그가 하드웨어를 대신할 수 있습니다.
-
-`control_backend`로 고르는 두 개의 교체 가능한 백엔드가 있습니다.
-
-**`agx`** (기본값) — 실기, `agx_arm_ctrl` 경유:
-
-| 용도 | 토픽 / 서비스 | 타입 |
-|---|---|---|
-| 자세 읽기 (`base_T_gripper`) | `feedback/tcp_pose` | `geometry_msgs/PoseStamped` |
-| 상태 읽기 | `feedback/arm_status` | `agx_arm_msgs/AgxArmStatus` |
-| 조인트 읽기 | `feedback/joint_states` | `sensor_msgs/JointState` |
-| 이동 (Cartesian) | `control/move_p` (또는 `move_l`) | `geometry_msgs/PoseStamped` |
-| 인에이블 | `enable_agx_arm` | `std_srvs/SetBool` |
-| 속도 | `<드라이버>/set_parameters` → `speed_percent` | `rcl_interfaces/SetParameters` |
-
-**`topic`** — 시뮬레이션 전용. `mock_robot_node`와 Gazebo 드라이버가 흉내내는
-구버전 `/pos_cmd` 인터페이스입니다. 실기에는 쓰지 않습니다. 교체 이유가 된
-구버전의 한계는 `agx_arm_ctrl/VENDOR.md`에 정리해 두었습니다.
-
-두 백엔드는 **같은 내부 상태 머신**에 데이터를 넣으므로, Gazebo에서 검증한 코드가
-그대로 실기에서 돕니다.
-
-> **속도에 관한 주의.** `PoseStamped`에는 속도 필드가 없습니다. 그래서
-> `piper_control_node`는 목표를 퍼블리시하기 **직전에** 검증된 목표별 속도를
-> 드라이버의 `speed_percent` 파라미터로 밀어넣고, 실패하면 이동을 중단합니다.
-> 이 과정이 없으면 팔은 드라이버 기본 속도로 움직입니다.
-
----
-
-## 4. 변환 규약 (반드시 읽으세요)
-
-프레임 방향 오류는 hand-eye 캘리브레이션 실패의 **가장 큰 원인**입니다.
-명명 규칙: `A_T_B` = "A 기준으로 표현된 B" = B의 점을 A로 매핑
-(`p_A = A_T_B @ p_B`).
-
-- `base_T_gripper` — 로봇 베이스 기준 그리퍼/플랜지 (`/end_pose_stamped`에서
-  가져옴)
-- `camera_T_target` — 카메라 광학 프레임 기준 마커 (검출 노드에서 가져옴)
-- `gripper_T_camera` — **캘리브레이션 결과** (그리퍼 기준 카메라)
-- `base_T_target` — 검증용으로만 사용
-
-**OpenCV `calibrateHandEye` (Eye-in-Hand) 매핑:**
-```
-R/t_gripper2base  == base_T_gripper     (샘플별 리스트)
-R/t_target2cam    == camera_T_target    (샘플별 리스트)
-반환값 cam2gripper == gripper_T_camera (퍼블리시하는 정적 TF)
-```
-
-**쿼터니언은 `transform_utils`의 모든 공개 함수에서 ROS 순서 `(x, y, z, w)`**를
-사용합니다. `(w, x, y, z)`로의 변환은 라이브러리 경계에서
-`quaternion_ros_to_wxyz` / `quaternion_wxyz_to_ros`를 통해서만 수행하세요.
-
-**퍼블리시되는 TF:** 부모 `link6` → 자식 `camera_color_optical_frame` =
-`gripper_T_camera`.
-
----
-
-## 5. 프레임 & 토픽 (기본값, 모두 설정 파일에서 변경 가능)
-
-- base=`base_link`, gripper=`link6`, camera=`camera_color_optical_frame`, target=`calibration_target`
-- image=`/camera/camera/color/image_raw`, camera_info=`/camera/camera/color/camera_info`
-
-시스템에 맞게 `config/*.yaml`에서 변경하세요.
-
----
-
-## 6. 의존성 & 빌드
+Ubuntu 22.04 + ROS 2 Humble이 필요합니다.
 
 ```bash
-# ROS 2 Humble, Ubuntu 22.04
 sudo apt install ros-humble-realsense2-camera ros-humble-cv-bridge \
                  ros-humble-tf2-ros ros-humble-rqt-gui-py
 pip install opencv-contrib-python numpy pyyaml   # aruco에는 contrib 필요
 
-# 빌드 (워크스페이스 루트에서)
-cd ~/piper_ros2_ws
-colcon build --symlink-install \
-  --packages-select auto_handeye_interfaces piper_auto_handeye piper_auto_handeye_gui
+mkdir -p ~/piper_ros2_ws && cd ~/piper_ros2_ws
+git clone https://github.com/pjhpjh6698/AgileX-Piper-auto-Hand-eye-Calibration.git autoCali
+cd autoCali
+colcon build
 source install/setup.bash
 ```
-실제 로봇 제어를 위해서는 `piper_msgs`(`Piper_ros` 소속)가 빌드/소싱되어
-있어야 합니다. 없을 경우 노드는 (mock 전용으로) 우아하게 축소 동작합니다.
 
----
+`--symlink-install`은 쓰지 마세요. 두 설치 방식이 섞이면 console script 래퍼가
+패키지 메타데이터를 찾지 못합니다.
 
-## 7. 빠른 시작 — 하드웨어 없이 (먼저 권장)
+## 사용법
 
-목(mock) 로봇과, 알려진 `gripper_T_camera` 값을 인코딩한 **카메라 없는** 합성
-마커로 전체 상태 머신을 실행합니다. 파이프라인은 이 값을 복원해야 합니다.
+### 1. 타겟을 인쇄하고 실측한다
 
-```bash
-ros2 launch piper_auto_handeye mock_calibration.launch.py
-# 다른 터미널에서 트리거:
-ros2 action send_goal /run_calibration auto_handeye_interfaces/action/RunCalibration \
-  "{target_sample_count: 10, auto_move: true, calibration_method: PARK,
-    settle_time: 0.3, observations_per_pose: 3, save_on_success: true}" --feedback
+`DICT_4X4_50`의 ID 1번 ArUco 마커나 ChArUco 보드를 인쇄합니다. 그리고 인쇄물을
+자로 재서, 생성기에 입력한 값이 아니라 실제로 잰 값을 넣으세요.
+
+이 단계가 보기보다 중요합니다. 타겟 크기는 자세 추정이 가진 유일한 스케일이라,
+크기가 10% 틀리면 카메라 위치도 작업 거리의 10%만큼 어긋납니다. 그런데 회전은
+정확하게 나오기 때문에 아무 데서도 이상이 드러나지 않습니다. 프린터는 조용히
+배율을 바꿉니다. 이 프로젝트도 133.3%로 인쇄된 보드 때문에 15mm 체커가 20mm가
+되어 하루를 날렸습니다.
+
+ChArUco 보드는 한 칸을 재지 말고 전체 폭을 재서 나누세요.
+
 ```
-결과는 `~/.ros/piper_auto_handeye/handeye_park_*.yaml`에 저장됩니다.
-퍼블리시 + 검증:
-```bash
-ros2 run piper_auto_handeye calibration_tf_publisher_node \
-  --ros-args -p calibration_file:=$(ls -t ~/.ros/piper_auto_handeye/handeye_park_*.yaml | grep -v samples | head -1)
-ros2 run tf2_ros tf2_echo link6 camera_color_optical_frame
+가로 전체 폭 ÷ 열 개수  ==  세로 전체 높이 ÷ 행 개수
 ```
 
----
+두 값이 일치해야 합니다. 그 값을 GUI나 `config/aruco.yaml`에 입력합니다.
 
-## 8. 실제 하드웨어
+타겟은 모든 자세에서 카메라에 보이도록 작업 공간에 단단히 고정하고, 팔 앞쪽
+20~30cm 정도에 두세요.
 
-### 8a. 카메라 시작 및 확인
-```bash
-ros2 launch realsense2_camera rs_launch.py enable_color:=true
-ros2 topic hz /camera/camera/color/image_raw
-ros2 topic echo /camera/camera/color/camera_info --once   # 내부 파라미터가 있는지 확인
-```
-
-### 8b0. 어느 카메라를 쓰는가
-RealSense가 2대 연결되어 있고 USB 인식 순서는 보장되지 않으므로, 손목
-(eye-in-hand) 카메라를 **시리얼 번호로 고정**합니다:
+### 2. CAN을 올리고 팔이 응답하는지 확인한다
 
 ```bash
-ros2 launch piper_auto_handeye real_calibration.launch.py \
-  wrist_camera_serial:=_338522300590      # 앞의 밑줄(_)을 반드시 유지
+bash piper_auto_handeye/scripts/can_setup.sh          # 발견되는 모든 CAN 어댑터
+ros2 run piper_auto_handeye agx_arm_check             # 읽기 전용 점검
 ```
-밑줄은 오타가 아닙니다 — realsense2_camera는 숫자만 있는 시리얼을 정수로
-해석해 매칭에 실패합니다. 시리얼 목록은 `rs-enumerate-devices -s`로 봅니다.
-카메라는 `/wrist/camera/...` 아래로 올라오고 depth는 끕니다(ArUco는 컬러만
-필요하고, D455 2대가 한 USB 컨트롤러에 물리면 대역폭이 포화될 수 있음).
 
-### 8b. ArUco 마커
-설정된 딕셔너리(`DICT_4X4_50`)와 설정된 ID(`target_marker_id: 1`)로 마커를
-출력하고, **인쇄된 한 변의 실제 길이를 측정**하세요. 측정값을
-`config/aruco.yaml`의 `marker_length`(미터 단위)에 설정합니다. 마커를 모든
-캘리브레이션 자세에서 보이도록 작업 공간에 견고하게 고정하세요.
-
-### 8c. CAN 기동 및 팔 응답 확인
-```bash
-bash piper_auto_handeye/scripts/can_setup.sh can_follower     # 멱등; sudo 필요
-ros2 run piper_auto_handeye agx_arm_check --can-port can_follower
-```
-`agx_arm_check`는 읽기 전용입니다 — 팔을 인에이블하지도, 모션을 명령하지도
-않습니다. 링크가 살아 있고, 프레임이 들어오며, **팔이** 실제로 자세를 디코딩하고
-결함이 없을 때만 0으로 종료하므로 런치 스크립트의 게이트로 쓸 수 있습니다.
+`agx_arm_check`는 팔을 인에이블하지도, 모션을 명령하지도 않습니다. 링크가 살아
+있고, 프레임이 들어오며, 팔이 결함 없이 자세를 디코딩할 때만 0으로 종료합니다.
 `NOT READY`가 나오면 그대로 진행하지 마세요.
 
-인터페이스 이름은 `ip -br link show type can`으로 확인합니다. leader/follower
-텔레오퍼레이션 구성이면 두 개가 잡히는데, 실제로 움직이며 손목 카메라가 달린
-쪽이 대상입니다.
+인터페이스 이름은 `ip -br link show type can`으로 확인하고, `can0`이 아니면
+`--can-port` / `can_port:=`로 지정합니다.
 
-### 8d. 나머지 전체
+### 3. 캘리브레이션한다
 
 ```bash
-# 로봇팔 드라이버, RealSense, 검출기, 제어, 관리자, TF, GUI를 한 번에 기동
 ros2 launch piper_auto_handeye real_calibration.launch.py
 ```
 
-**이 런치는 실제로 로봇을 움직입니다.** GUI에서 Start를 누르면 팔이 캘리브레이션
-자세들을 순회합니다. 첫 실행 전에 `config/calibration_poses.yaml`의 자세들이 이
-로봇에서 도달 가능하고 충돌이 없는지 확인하고, 비상 정지 옆에서 시작하세요.
+이 launch는 로봇을 실제로 움직입니다. 첫 실행에서는 비상 정지 버튼에 손을 두세요.
 
-런타임에 실제로 보호해 주는 것은 `config/piper.yaml`의 한계값들입니다:
-`workspace_min`/`workspace_max`(작업 공간 밖 목표 거부),
-`max_step_distance`(한 번에 이 거리 이상 이동 거부),
-`max_speed_fraction`(드라이버에 밀어넣는 속도 상한), 그리고 STOP 버튼.
+GUI에서: CAN 패널이 초록인지 확인 → 타겟 종류 선택 후 실측 크기 입력 → RViz
+시작 → Start. 팔이 자세를 순회하다가 샘플이 충분히 모이면 스스로 멈춥니다.
+결과는 `gripper_T_camera` 패널에 나오고 샘플마다 갱신됩니다.
 
-명령 없이 자세 목록만 훑어보고 싶으면:
+모션 없이 전체 스위프만 확인하려면:
+
 ```bash
 ros2 launch piper_auto_handeye real_calibration.launch.py dry_run:=true
 ```
 
-정지 수단이 두 가지로 분리되어 있습니다. `/stop_motion`은 현재 자세를 유지하는
-안전한 캘리브레이션용 정지(GUI STOP 버튼)이고, `/hard_stop`은 구동 전원을
-차단합니다 — **팔이 떨어집니다.** 그게 더 나은 선택일 때만 쓰세요.
+### 4. 결과를 확인한다
 
-### 8e. 그리퍼가 마커를 가릴 때 (자동 복구)
+Publish TF를 누르면 내장 RViz의 손목 위에 카메라 프레임이 나타납니다. 팔을
+움직여 보세요. 제대로 된 캘리브레이션은 카메라 프레임이 실제 카메라가 있는
+자리에 붙어서 따라다니고, 잘못된 값은 그리퍼에서 떠 있거나 엉뚱한 방향을
+가리킵니다.
 
-eye-in-hand에서는 그리퍼가 카메라와 세상 사이에 있어서, 어떤 자세에서는 마커를
-그냥 덮어버립니다. 예전 동작은 그 자세를 건너뛰는 것이었는데, 이러면 해를
-잘 조건화해주는 방향성(orientation)들이 조용히 빠져나갑니다. 지금은 실패 원인을
-구분해 다르게 대응합니다:
+따로 보려면:
 
-| 상황 | 판정 | 대응 |
-|---|---|---|
-| 마커를 **한 번도** 못 봄 (`marker_recovery_min_sightings` 미만) | 가림 | 손목을 옮겨 재촬영 (`RECOVERING` 상태) |
-| 마커는 보이는데 프레임 품질이 부족 | 불안정 | 제자리에서 창을 넓혀가며 재시도 |
-
-복구 자세는 **싼 것부터** 시도합니다: 먼저 뒤로 물러나 화각을 넓히고(회전 없음),
-그다음 요/피치를 조금씩 섞습니다. 최대 이동 11 cm, 회전 12°로 제한되므로 원래
-포즈 세트가 노린 방향 다양성은 유지됩니다.
-
-이렇게 얻은 샘플도 유효합니다 — 솔버가 쓰는 건 명령한 자세가 아니라
-`(base_T_gripper, camera_T_target)` **쌍**이기 때문입니다.
-
-검출 자체의 흔들림은 근본 원인을 고쳤습니다: OpenCV 기본값인
-`CORNER_REFINE_NONE`은 코너를 정수 픽셀에 붙이는데, solvePnP가 코너 위치로
-자세를 만들기 때문에 1픽셀 흔들림이 수 도의 회전 지터가 됩니다. 이제
-`corner_refinement: subpix`가 기본입니다(`config/aruco.yaml`).
-
-동작을 조절하려면 `config/handeye.yaml`의 `marker_recovery_*` /
-`marker_retry_*` 항목을 보세요. `marker_recovery_enabled: false`로 끄면
-예전처럼 건너뜁니다.
-
----
-
-## 9. 자동 캘리브레이션
 ```bash
-ros2 action send_goal /run_calibration auto_handeye_interfaces/action/RunCalibration \
-  "{target_sample_count: 15, auto_move: true, calibration_method: PARK,
-    save_on_success: true}" --feedback
-```
-흐름: 시스템 점검 → 각 자세마다: 이동 → 정착(settle) → 마커 안정화 대기 →
-N개 프레임 평균 → `(base_T_gripper, camera_T_target)` 저장 → 반복 → 계산 →
-검증(선택적 이상치 제거) → 저장 → (서비스/노드를 통해 TF 퍼블리시).
-
-## 10. 수동 캘리브레이션 (`auto_move:=false`)
-로봇을 직접(teach/teleop) 움직인 뒤, 현재 쌍을 캡처합니다:
-```bash
-ros2 action send_goal /run_calibration auto_handeye_interfaces/action/RunCalibration \
-  "{target_sample_count: 15, auto_move: false}" --feedback &
-# 로봇이 새 자세에서 정지할 때마다:
-ros2 service call /add_manual_sample auto_handeye_interfaces/srv/AddManualSample "{}"
-```
-
-## 11. GUI
-```bash
-rqt --standalone piper_auto_handeye_gui
-```
-카메라 뷰, 마커/로봇 상태, 시작/일시정지/취소/리셋/샘플추가, 방법 + 목표
-샘플 수, 실시간 진행 상황, 결과(`gripper_T_camera`의 이동/쿼터니언/RPY +
-RMS), 저장/불러오기/TF 퍼블리시/로그. GUI는 **오직** ROS 토픽/서비스/액션을
-통해서만 통신하며, GUI를 닫아도 캘리브레이션 매니저는 멈추지 않습니다.
-
----
-
-## 12. 서비스
-```bash
-ros2 service call /reset_calibration  auto_handeye_interfaces/srv/ResetCalibration "{}"
-ros2 service call /save_calibration   auto_handeye_interfaces/srv/SaveCalibration "{path: ''}"
-ros2 service call /load_calibration   auto_handeye_interfaces/srv/LoadCalibration "{path: ''}"
-ros2 service call /publish_calibration_tf auto_handeye_interfaces/srv/PublishCalibrationTf "{path: '', publish: true}"
-```
-
-## 13. 출력
-- 결과: `~/.ros/piper_auto_handeye/handeye_<method>_<timestamp>.yaml`
-  (이동, 쿼터니언, 4×4 행렬, 검증 결과, 소스 포함).
-- 원시 샘플: `..._samples.yaml` (샘플별 자세 + 재투영 오차, 안정성,
-  로봇-마커 Δt, 수락/거절 사유).
-
-## 14. RViz에서 검증
-```bash
-rviz2   # Fixed Frame = base_link; TF 디스플레이 추가; 카메라 프레임이 플랜지에 위치하는지 확인
+ros2 launch piper_auto_handeye view_calibration.launch.py
 ros2 run tf2_ros tf2_echo link6 camera_color_optical_frame
 ```
 
----
+결과는 `~/.ros/piper_auto_handeye/handeye_<방법>_<시각>.yaml`에 저장되며, 원본
+샘플과 수락/거부 사유가 담긴 `_samples.yaml`이 함께 생성됩니다.
 
-## 15. 검증 및 품질
-`base_T_target_i = base_T_gripper_i @ gripper_T_camera @ camera_T_target_i`는
-모든 i에 대해 (거의) 동일해야 합니다. 검증기는 이동/회전 RMS 및 최댓값을
-보고하고, 이상치를 표시하며, 최악의 샘플을 (제한된 범위 내에서) 반복적으로
-제거할 수 있습니다. `config/handeye.yaml`의 임계값
-(`maximum_translation_rms_m`, `maximum_rotation_rms_deg`)이
-SUCCESS/WARNING/FAILED를 결정합니다. **2축 이상**의 회전과 이동 다양성을
-포함한 **15–25개 샘플**을 권장하며, `minimum_samples` 하한은 10입니다.
+## Launch 인자
 
-## 16. 테스트
+| 인자 | 기본값 | 의미 |
+|---|---|---|
+| `dry_run` | `false` | `true`면 로봇을 움직이지 않고 자세만 검증 |
+| `gui_lang` | `ko` | GUI 언어. 영어는 `en` |
+| `can_port` | `can0` | 팔이 물린 socketcan 인터페이스 |
+| `wrist_camera_serial` | (빈 값) | 비우면 연결된 유일한 카메라를 사용 |
+| `calibration_method` | `TSAI` | `TSAI`, `PARK`, `HORAUD`, `ANDREFF`, `DANIILIDIS` |
+| `use_gui` | `true` | rqt GUI 실행 |
+| `use_realsense` | `true` | 카메라 실행 |
+| `use_piper_driver` | `true` | 벤더링된 AgileX 드라이버 실행 |
+
+전체 목록은 `ros2 launch piper_auto_handeye real_calibration.launch.py --show-args`
+로 볼 수 있습니다.
+
+RealSense가 2대 이상이면 손목 카메라를 시리얼로 고정하세요. 앞의 밑줄을 반드시
+유지해야 합니다. realsense2_camera가 숫자만 있는 시리얼을 정수로 해석해 매칭에
+실패하기 때문입니다.
+
 ```bash
-# ROS 비의존 수학 (합성 hand-eye 복원, 노이즈, 가드, 필터):
-cd src/autoCali/piper_auto_handeye && python3 -m pytest test/ -q
-# 또는 colcon으로:
-colcon test --packages-select piper_auto_handeye
+ros2 launch piper_auto_handeye real_calibration.launch.py \
+  wrist_camera_serial:=_123456789012        # rs-enumerate-devices -s 로 조회
 ```
 
----
+GUI 언어는 launch 없이도 지정할 수 있습니다.
 
-## 17. 문제 해결
-- **`target_id_N_not_seen`** — `target_marker_id`/딕셔너리가 잘못되었거나
-  마커가 시야에 없음.
-- **`reproj_error_*`** — `marker_length`가 잘못되었거나, 모션 블러, 또는
-  잘못된 내부 파라미터.
-- **`waiting_for_camera_info`** — camera_info 토픽 이름이 잘못되었거나 카메라가
-  켜져 있지 않음.
-- **이동이 "not enabled"로 거부됨** — 어댑터는 실제 이동 전에 자동으로
-  인에이블합니다(`auto_enable: true`). `/arm_status`와 CAN을 확인하세요.
-- **이동이 "outside workspace"로 거부됨** — `config/piper.yaml`의
-  `workspace_min/max`를 조정하세요.
-- **회전 다양성 부족 경고** — 서로 다른 축으로 회전하는 자세를 추가하세요.
-- **매니저가 이동할 수 없음** — `piper_control_node`(또는 `mock_robot_node`)가
-  실행 중이고 `move_to_calibration_pose` 액션 서버가 떠 있는지
-  (`ros2 action list`) 확인하세요.
+```bash
+HANDEYE_GUI_LANG=en rqt --standalone piper_auto_handeye_gui.handeye_gui_plugin.HandeyeGuiPlugin
+```
 
-## 18. ⚠️ 안전
-- `dry_run`은 모든 곳에서 기본값이 **true**입니다. 실제 이동을 위해서는 제어
-  노드에 `dry_run:=false`를 설정하고 **그리고** 각 goal마다
-  `dry_run=false`를 설정해야 합니다.
-- `config/calibration_poses.yaml`의 자세들은 **자리표시자(placeholder)**이며
-  로봇에 맞게 검증되지 않았습니다. `dry_run:=false` **전에** mock + RViz에서
-  도달 범위/충돌을 검증하세요.
-- 작업 공간 경계, 최대 스텝 거리, 최대 속도, NaN 거부, 타임아웃은
-  `safety_validator.py`에서 강제됩니다. 천천히 시작하고 비상 정지 버튼
-  옆에서 대기하세요.
+## 설정
+
+프레임과 임계값은 `piper_auto_handeye/config/`에 있습니다. 기본 프레임은
+`base_link`, `link6`, `camera_color_optical_frame`, `calibration_target`입니다.
+
+| 파일 | 내용 |
+|---|---|
+| `aruco.yaml` | 타겟 종류, 마커 ID와 크기, 보드 규격, 검출 튜닝 |
+| `handeye.yaml` | 프레임, 솔버, 샘플 수, 자세 스위프, 복구, 임계값 |
+| `piper.yaml` | 작업 공간 경계, 스텝/속도 제한 |
+
+알아둘 점:
+
+- `target_samples`(30)는 솔브에 들어가는 (로봇자세, 마커자세) 쌍의 개수이고,
+  `observations_per_pose`(10)는 그 쌍 하나를 만들기 위해 평균내는 카메라 프레임
+  수입니다. N장을 평균내면 랜덤 검출 노이즈가 약 `sqrt(N)`배 줄지만, 10장을
+  넘어서면 남는 오차는 계통 오차라 평균으로 지워지지 않습니다.
+- 퍼블리시되는 TF는 `camera_link`로 재타겟팅됩니다(`retarget_frame`). RealSense
+  드라이버가 이미 `camera_color_optical_frame`의 부모를 갖고 있고 하나의
+  프레임은 부모를 하나만 가질 수 있기 때문입니다. `base_link`에서 광학
+  프레임까지의 체인은 그대로 유지됩니다.
+
+## 자주 묻는 질문
+
+"회전 다양성 부족"으로 솔브가 실패합니다.
+: 자세들이 너무 비슷합니다. Hand-eye는 최소 두 축에 대한 회전이 필요합니다.
+  내장 스위프는 이미 이를 만족하므로, 직접 자세를 넣었다면 다른 축으로 회전하는
+  자세를 추가하세요.
+
+ChArUco와 ArUco 결과가 몇 센티미터 차이 납니다.
+: 거의 항상 타겟 크기가 틀린 경우입니다. 1단계를 보세요. 스케일 오차는 회전은
+  정확한 채 이동값에만 나타나기 때문에 발견하기가 유난히 어렵습니다.
+
+마커가 잘 보이는데 계속 거부됩니다.
+: GUI 상태 패널의 reprojection error를 보세요. 마커가 보이는데 값이 크면
+  `marker_length`가 틀렸거나 카메라 내부 파라미터가 나쁩니다. 값은 정상인데
+  stability가 낮다면 팔이 아직 흔들리는 것이므로 `settle_time`을 올리세요.
+
+팔이 "outside workspace"라며 움직이지 않습니다.
+: 목표가 `config/piper.yaml`의 `workspace_min`/`workspace_max` 밖입니다.
+
+그리퍼가 자꾸 마커를 가립니다.
+: eye-in-hand에서는 정상이며 이미 처리됩니다. 손목을 조금 움직여 다시 촬영하는
+  `RECOVERING` 상태로 들어갑니다. `config/handeye.yaml`의 `marker_recovery_*`로
+  조절합니다.
+
+## 안전
+
+이 launch는 실제 모션을 명령합니다. 실행을 보호하는 것은 `config/piper.yaml`의
+제한값들, 즉 직교 작업 공간 경계, 한 번의 이동 최대 거리, 속도 상한입니다.
+정지는 두 종류입니다. `/stop_motion`은 현재 자세를 유지하며 GUI의 STOP 버튼이
+호출하는 안전한 정지이고, `/hard_stop`은 구동 전원을 끊어 팔이 떨어지므로 그것이
+덜 나쁜 상황에서만 쓰세요.
+
+새 환경에서는 움직이게 하기 전에 `dry_run:=true`로 한 번 돌려 보세요.
+
+## 테스트
+
+```bash
+colcon test --packages-select piper_auto_handeye piper_auto_handeye_gui
+```
+
+수학 코어(`transform_utils`, `calibration_solver`, `calibration_validator`,
+`pose_filter`, `safety_validator`)는 ROS에 의존하지 않으며, 정답을 아는 합성
+hand-eye 문제로 검증합니다.
+
+## 패키지 구성
+
+| 패키지 | 내용 |
+|---|---|
+| `piper_auto_handeye` | 노드, 수학 코어, 설정, launch, 테스트 |
+| `piper_auto_handeye_gui` | rqt GUI 플러그인 |
+| `auto_handeye_interfaces` | 메시지, 서비스, 액션 |
+| `piper_auto_handeye_sim` | Gazebo 검증 리그 |
+| `agx_arm_description` | RViz 로봇 모델용 벤더링 URDF와 메시 |
+| `agx_arm_ctrl`, `agx_arm_msgs`, `pyagxarm_vendor` | 벤더링된 AgileX 드라이버와 SDK |
+
+`piper_control_node`는 CAN 버스를 직접 열지 않고, 버스를 소유한 AgileX
+드라이버와 대화합니다. 덕분에 캘리브레이션 정책(안전 한계, 목표 검증, 도달
+판정)이 "팔에 어떻게 닿는지"와 무관한 한 곳에 모입니다.
+
+## 벤더링된 서드파티 코드
+
+전체 경로가 `colcon build` 한 번으로 빌드되도록 워크스페이스에 복사해 두었으며,
+`pip install`이나 `PYTHONPATH` 수정이 필요 없습니다. 출처 표기는 라이선스
+조건입니다.
+
+| 디렉터리 | 업스트림 | 버전 | 라이선스 |
+|---|---|---|---|
+| `agx_arm_ctrl`, `agx_arm_msgs`, `agx_arm_description` | [agx_arm_ros](https://github.com/agilexrobotics/agx_arm_ros) (`ros2` 브랜치) | commit `91e6b2e`, 복사 2026-07-27 | Apache-2.0 |
+| `pyagxarm_vendor/pyAgxArm` | [pyAgxArm](https://github.com/agilexrobotics/pyAgxArm) | v1.0.0, commit `cc498c0`, 복사 2026-07-27 | MIT |
+
+업스트림 `.py` 파일은 수정하지 않았습니다. `agx_arm_description`에만 메시
+관련 수정 두 가지가 있습니다. Collada 비주얼을 옆에 함께 배포된 STL로
+교체했고(Humble의 RViz에서 `.dae`가 로드되지 않음), 각 비주얼에 회색 재질을
+선언했습니다. STL에는 색 정보가 없어 재질이 없으면 RViz가 모델 전체를 빨간색
+으로 그리기 때문입니다.
+
+## 참고 문헌
+
+R. Tsai and R. Lenz, "A new technique for fully autonomous and efficient 3D
+robotics hand/eye calibration", IEEE Transactions on Robotics and Automation,
+1989.
+
+GUI와 작업 흐름은
+[easy_handeye2](https://github.com/marcoesposito1988/easy_handeye2)의 구성을
+참고했습니다.

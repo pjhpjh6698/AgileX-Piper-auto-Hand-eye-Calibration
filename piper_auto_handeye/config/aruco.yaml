@@ -1,10 +1,11 @@
 # ArUco target detector parameters.
 # Loaded by aruco_detector_node. All lengths in meters.
 #
-# TWO RealSense cameras are attached to this machine, so the topics below are
-# namespaced to the WRIST one (the eye-in-hand camera). real_calibration.launch.py
-# starts it with camera_namespace:=wrist camera_name:=camera and pins it by
-# serial number, so nothing depends on USB enumeration order.
+# The topics below are namespaced to the wrist (eye-in-hand) camera:
+# real_calibration.launch.py starts it with camera_namespace:=wrist
+# camera_name:=camera. The namespace is fixed even on a single-camera rig, so
+# that adding a second camera later needs no config change here -- pin the
+# wrist one with wrist_camera_serial:= and nothing depends on USB order.
 /**:
   ros__parameters:
     image_topic: /wrist/camera/color/image_raw
@@ -22,10 +23,30 @@
     marker_length: 0.07               # marker side length [m]
 
     # ---- charuco board geometry (only used when target_type: charuco) ----
-    charuco_squares_x: 5              # squares along X
-    charuco_squares_y: 7              # squares along Y
-    charuco_square_length: 0.035      # chessboard square side [m] -- MEASURE the print
-    charuco_marker_length: 0.026      # ArUco side inside the squares [m]
+    # The calib.io spec for this rig: 11 x 8 squares at 15 mm, DICT_4X4,
+    # Start ID 1 -- so the printed pattern must span 165 x 120 mm.
+    #
+    # VERIFY THAT SPAN WITH A RULER BEFORE TRUSTING A CALIBRATION. The first
+    # print of this board came out at 133.3% (72-vs-96 DPI, the classic PDF
+    # scaling slip), making the squares 20 mm while this file still said 15.
+    # square_length is the board's only scale, so every board pose came back
+    # 25% too close; and because the sweep aims all poses at one point, that
+    # depth bias did not average out. It landed in gripper_T_camera as a ~4 cm
+    # shift along the optical axis with the rotation still exact -- which is
+    # exactly why ChArUco matched ArUco in orientation but not in position, and
+    # why nothing downstream flagged it. Print at 100% / "actual size", then
+    # measure the full 11-square and 8-square spans and divide; the two must
+    # agree. Correct this value to whatever they say.
+    charuco_squares_x: 11             # calib.io "Columns"
+    charuco_squares_y: 8              # calib.io "Rows"
+    charuco_square_length: 0.015      # calib.io "Checker Width" -> 165 x 120 mm
+    # calib.io's generator has no marker-size field; 0.0112 assumes the usual
+    # 0.75 ratio. Only affects which corners get interpolated, not the pose
+    # scale, so an approximate value here is harmless.
+    charuco_marker_length: 0.0112
+    # calib.io "Start ID". OpenCV numbers board markers from 0; with the wrong
+    # start every marker maps to the wrong cell and the board barely detects.
+    charuco_start_id: 1
     charuco_min_corners: 6            # fewer interpolated corners => rejected
 
     # Frames
@@ -35,6 +56,20 @@
     # Output
     publish_debug_image: true
     publish_tf: false                 # detector->target TF (debug only; not the handeye TF)
+
+    # ---- Detection-rate tuning ------------------------------------------
+    # CLAHE (adaptive histogram equalisation) before detection: evens out
+    # glare and washed-out lighting -- phone screens and overhead lights are
+    # where most "marker clearly visible yet not detected" frames come from.
+    enable_clahe: true
+    # OpenCV's default adaptive-threshold sweep (3..23 px windows) is sized
+    # for SMALL markers; a marker filling much of a 720p frame fragments under
+    # those windows and no quad is ever formed. Sweep bigger windows too.
+    adaptive_thresh_win_max: 45
+    adaptive_thresh_win_step: 6
+    # Correct one more bit-error than the 0.6 default -- cheap robustness
+    # against glare speckle. Do not raise past ~0.9 (false positives).
+    error_correction_rate: 0.8
 
     # Planar pose-flip ambiguity gate. A square marker seen near-frontally has
     # TWO PnP solutions with almost equal reprojection error; letting the

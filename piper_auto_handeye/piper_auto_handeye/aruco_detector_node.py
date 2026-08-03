@@ -45,7 +45,8 @@ def _get_dictionary(name: str):
 
 
 def _make_params(refine="subpix", win_size=5, max_iter=50, min_accuracy=0.01,
-                 logger=None):
+                 logger=None, thresh_win_max=45, thresh_win_step=6,
+                 error_correction_rate=0.8):
     """Build DetectorParameters with sub-pixel corner refinement enabled.
 
     This matters more than anything else downstream. With the OpenCV defaults
@@ -76,6 +77,17 @@ def _make_params(refine="subpix", win_size=5, max_iter=50, min_accuracy=0.01,
         params.cornerRefinementWinSize = int(win_size)
         params.cornerRefinementMaxIterations = int(max_iter)
         params.cornerRefinementMinAccuracy = float(min_accuracy)
+        # Detection-rate tuning. OpenCV's default adaptive-threshold sweep
+        # (windows 3..23) is sized for small markers; a marker filling a large
+        # part of a 720p frame fragments under such small windows and the quad
+        # is never formed. Sweeping up to ~45 px fixes exactly the "marker is
+        # right there and huge, why is it not detected" failure.
+        params.adaptiveThreshWinSizeMin = 3
+        params.adaptiveThreshWinSizeMax = int(thresh_win_max)
+        params.adaptiveThreshWinSizeStep = int(thresh_win_step)
+        # 0.8 corrects one more bit-error per marker than the 0.6 default --
+        # cheap robustness against glare speckle on screen-displayed markers.
+        params.errorCorrectionRate = float(error_correction_rate)
     except AttributeError as exc:   # very old cv2.aruco builds
         if logger:
             logger.warn(f"corner refinement unavailable in this OpenCV build: {exc}")
@@ -118,11 +130,21 @@ class ArucoDetectorNode(Node):
         self.ch_square_len = float(p("charuco_square_length", 0.035).value)
         self.ch_marker_len = float(p("charuco_marker_length", 0.026).value)
         self.ch_min_corners = int(p("charuco_min_corners", 6).value)
+        # First marker ID on the printed board (calib.io "Start ID"; OpenCV is 0)
+        self.ch_start_id = int(p("charuco_start_id", 0).value)
         # Planar pose-flip handling: below this best/second reprojection-error
         # ratio the two PnP branches are considered indistinguishable and the
         # frame is disambiguated against history (or rejected). See _solve.
         self.ambiguity_ratio = float(p("ambiguity_min_ratio", 1.3).value)
         self._last_R = None
+        # Contrast enhancement before detection. CLAHE evens out glare and
+        # washed-out lighting (phone screens, overhead lights), which is where
+        # most "marker clearly visible yet not detected" frames come from.
+        self.enable_clahe = bool(p("enable_clahe", True).value)
+        self.thresh_win_max = int(p("adaptive_thresh_win_max", 45).value)
+        self.thresh_win_step = int(p("adaptive_thresh_win_step", 6).value)
+        self.err_corr_rate = float(p("error_correction_rate", 0.8).value)
+        self._clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
         self.camera_frame = p("camera_frame", "camera_color_optical_frame").value
         self.target_frame = p("target_frame", "calibration_target").value
         self.publish_debug = bool(p("publish_debug_image", True).value)
@@ -144,13 +166,12 @@ class ArucoDetectorNode(Node):
         self.dictionary = _get_dictionary(self.dict_name)
         self.det_params = _make_params(self.corner_refinement, self.refine_win,
                                        self.refine_iter, self.refine_acc,
-                                       self.get_logger())
+                                       self.get_logger(),
+                                       self.thresh_win_max, self.thresh_win_step,
+                                       self.err_corr_rate)
         self.detect = _make_detector(self.dictionary, self.det_params)
         self.board = None
-        if hasattr(cv2.aruco, "CharucoBoard_create"):
-            self.board = cv2.aruco.CharucoBoard_create(
-                self.ch_squares_x, self.ch_squares_y,
-                self.ch_square_len, self.ch_marker_len, self.dictionary)
+        self._rebuild_board()
         # allow the GUI to flip aruco <-> charuco while running
         self.add_on_set_parameters_callback(self._on_set_parameters)
         self.pose_filter = PoseFilter(self.filter_window, self.max_t_jump, self.max_r_jump)
@@ -201,6 +222,8 @@ class ArucoDetectorNode(Node):
             return
 
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        if self.enable_clahe:
+            gray = self._clahe.apply(gray)
         corners, ids = self.detect(gray)
 
         if self.target_type == "charuco":
@@ -315,6 +338,48 @@ class ArucoDetectorNode(Node):
             return f"reproj_error_{reproj:.2f}px", None, None, None
         return "", rvec, tvec, reproj
 
+    def _rebuild_board(self):
+        """(Re)build the ChArUco board from the current geometry parameters.
+
+        charuco_start_id matters more than it looks: calib.io boards are often
+        generated with Start ID = 1, while OpenCV numbers board markers from 0.
+        With mismatched ids every detected marker is attributed to the WRONG
+        cell (or none), interpolateCornersCharuco finds almost nothing, and the
+        board "barely detects" even though every individual marker decodes
+        fine. setIds() renumbers the board to match the print.
+        """
+        if hasattr(cv2.aruco, "CharucoBoard_create"):
+            self.board = cv2.aruco.CharucoBoard_create(
+                self.ch_squares_x, self.ch_squares_y,
+                self.ch_square_len, self.ch_marker_len, self.dictionary)
+            if self.ch_start_id:
+                n = len(self.board.ids)
+                self.board.setIds(np.arange(
+                    self.ch_start_id, self.ch_start_id + n,
+                    dtype=np.int32).reshape(-1, 1))
+            # square_length is the board's ONLY scale, and estimatePoseCharucoBoard
+            # believes it absolutely: assume squares 15% smaller than the print and
+            # every board pose comes back 15% too close. Because the sweep aims all
+            # poses at one spot, that depth bias does not average out -- it lands
+            # in gripper_T_camera as a pure translation along the optical axis,
+            # with the rotation still perfect. Printing at anything other than
+            # 100% scale is the usual cause, so state the span to measure.
+            self.get_logger().info(
+                f"charuco pattern spans "
+                f"{self.ch_squares_x * self.ch_square_len * 1000:.1f} x "
+                f"{self.ch_squares_y * self.ch_square_len * 1000:.1f} mm "
+                f"({self.ch_squares_x}x{self.ch_squares_y} @ "
+                f"{self.ch_square_len * 1000:.2f} mm) -- measure this on the "
+                f"printed board; a scale error becomes the same fraction of the "
+                f"camera-to-board distance in the calibration result")
+
+    def _rebuild_dictionary(self, name):
+        """Swap the ArUco dictionary and everything derived from it."""
+        self.dict_name = name
+        self.dictionary = _get_dictionary(name)
+        self.detect = _make_detector(self.dictionary, self.det_params)
+        self._rebuild_board()
+
     def _on_set_parameters(self, params):
         """Runtime switches (used by the GUI): target type, marker ID, size.
 
@@ -371,6 +436,70 @@ class ArucoDetectorNode(Node):
                 self.pose_filter.reset()
                 self._last_R = None
                 self.get_logger().info(f"marker_length -> {value * 1000:.1f} mm")
+            elif prm.name == "aruco_dictionary":
+                name = str(prm.value)
+                if not hasattr(cv2.aruco, name):
+                    return SetParametersResult(
+                        successful=False, reason=f"unknown dictionary {name!r}")
+                self._rebuild_dictionary(name)
+                self.pose_filter.reset()
+                self._last_R = None
+                self.get_logger().info(f"aruco_dictionary -> {name}")
+        # Board geometry arrives as a batch from the GUI. Validate the FINAL
+        # combination, not each value against the current state -- otherwise
+        # shrinking square+marker together fails ("new square < old marker")
+        # purely because of processing order.
+        geo = {}
+        for prm in params:
+            if prm.name == "charuco_start_id":
+                try:
+                    v = int(prm.value)
+                except (TypeError, ValueError):
+                    return SetParametersResult(
+                        successful=False, reason="charuco_start_id must be an integer")
+                if not 0 <= v <= 900:
+                    return SetParametersResult(
+                        successful=False, reason="charuco_start_id must be 0..900")
+                geo[prm.name] = v
+            elif prm.name in ("charuco_squares_x", "charuco_squares_y"):
+                try:
+                    v = int(prm.value)
+                except (TypeError, ValueError):
+                    return SetParametersResult(
+                        successful=False, reason=f"{prm.name} must be an integer")
+                if not 2 <= v <= 30:
+                    return SetParametersResult(
+                        successful=False, reason=f"{prm.name} must be 2..30")
+                geo[prm.name] = v
+            elif prm.name in ("charuco_square_length", "charuco_marker_length"):
+                try:
+                    v = float(prm.value)
+                except (TypeError, ValueError):
+                    return SetParametersResult(
+                        successful=False, reason=f"{prm.name} must be a number")
+                if not 0.003 <= v <= 0.3:
+                    return SetParametersResult(
+                        successful=False, reason=f"{prm.name} must be 0.003..0.3 m")
+                geo[prm.name] = v
+        if geo:
+            square = geo.get("charuco_square_length", self.ch_square_len)
+            marker = geo.get("charuco_marker_length", self.ch_marker_len)
+            if marker >= square:
+                return SetParametersResult(
+                    successful=False,
+                    reason=f"charuco marker ({marker * 1000:.1f}mm) must be smaller "
+                           f"than the square ({square * 1000:.1f}mm)")
+            self.ch_squares_x = geo.get("charuco_squares_x", self.ch_squares_x)
+            self.ch_squares_y = geo.get("charuco_squares_y", self.ch_squares_y)
+            self.ch_start_id = geo.get("charuco_start_id", self.ch_start_id)
+            self.ch_square_len = square
+            self.ch_marker_len = marker
+            self._rebuild_board()
+            self.pose_filter.reset()
+            self._last_R = None
+            self.get_logger().info(
+                f"charuco board -> {self.ch_squares_x}x{self.ch_squares_y}, "
+                f"square {square * 1000:.1f}mm, marker {marker * 1000:.1f}mm")
         return SetParametersResult(successful=True)
 
     def _solve(self, img_points):

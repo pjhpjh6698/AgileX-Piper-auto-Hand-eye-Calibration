@@ -21,7 +21,7 @@ action, on top of one of two interchangeable backends:
 ``topic`` -- SIMULATION
     The older AgileX ``/pos_cmd`` interface. ``mock_robot_node`` and the Gazebo
     driver emulate exactly this, so the sim launches select it. It is not used
-    against hardware any more; see agx_arm_ctrl/VENDOR.md for why.
+    against hardware any more; see the workspace README for why.
 
       reads  end_pose_topic    (PoseStamped)    -> base_T_gripper
              arm_status_topic  (PiperStatusMsg) -> enabled / error

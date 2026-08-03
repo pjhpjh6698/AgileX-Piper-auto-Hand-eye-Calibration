@@ -7,7 +7,7 @@
     Vendored AgileX pyAgxArm SDK (upstream v1.0.0), packaged so the calibration
     workspace can import pyAgxArm from a plain colcon build without a separate
     pip install. Source is upstream-identical apart from a dropped demos
-    directory. See VENDOR.md for provenance and update steps.
+    directory. See section 19 of the workspace README for provenance.
   </description>
   <maintainer email="pjhpjh6698@gmail.com">jh</maintainer>
   <license>MIT</license>

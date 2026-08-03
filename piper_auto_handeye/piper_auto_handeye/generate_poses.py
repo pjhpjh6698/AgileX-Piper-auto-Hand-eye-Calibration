@@ -24,7 +24,7 @@ Usage
 -----
     # 1. hand-guide / jog the arm until the marker fills the camera view
     # 2. generate a pose set around that configuration
-    ros2 run piper_auto_handeye generate_poses --can-port can_follower
+    ros2 run piper_auto_handeye generate_poses --can-port can0
     # 3. review, then install it
     ros2 run piper_auto_handeye generate_poses --out src/.../calibration_poses.yaml
 
@@ -141,7 +141,7 @@ def to_yaml(kept, speed, settle):
 def main(argv=None):
     ap = argparse.ArgumentParser(
         description="Generate reachable calibration poses from the arm's own kinematics.")
-    ap.add_argument("--can-port", default="can_follower")
+    ap.add_argument("--can-port", default="can0")
     ap.add_argument("--count", type=int, default=14,
                     help="how many poses to emit (default 14)")
     ap.add_argument("--joint-spread", type=float, default=18.0,

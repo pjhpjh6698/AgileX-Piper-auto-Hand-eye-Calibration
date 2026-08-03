@@ -1,361 +1,268 @@
-# Piper Auto Hand-Eye Calibration (Eye-in-Hand, ArUco)
+# AgileX Piper Auto Hand-Eye Calibration
 
-Automatic **Eye-in-Hand** hand-eye calibration for the **AgileX Piper** arm with an
-**Intel RealSense** camera mounted on the end-effector, observing a fixed **ArUco**
-marker. The system automatically moves the robot through a set of poses, collects
-`(base_T_gripper, camera_T_target)` pairs, and computes `gripper_T_camera` with
-OpenCV `calibrateHandEye()`.
+Automatic eye-in-hand calibration for the AgileX Piper arm with a RealSense
+camera on the wrist. Press Start and the arm walks itself through a set of
+poses, watches a fixed marker, and computes the camera's position on the
+gripper. No jogging the robot by hand, no writing down poses.
 
-> **Status:** MVP — single fixed ArUco marker target. ChArUco/GridBoard is left as a
-> documented extension point (see `aruco_detector_node`), not yet implemented.
+한국어 문서는 [README.ko.md](README.ko.md)를 보세요.
 
----
+## Features
 
-## 1. What this does
+- One launch file brings up the arm, camera, detector, solver, GUI and RViz.
+- The arm plans and drives its own pose sweep; you only press Start.
+- ArUco marker or ChArUco board, switchable from the GUI while running.
+- Live result: the estimate is re-solved and shown after every accepted sample.
+- Recovers automatically when the gripper hides the marker.
+- Five solvers (Tsai-Lenz, Park, Horaud, Andreff, Daniilidis) via OpenCV.
+- Korean and English GUI.
+- Everything the robot needs is vendored, so a fresh machine is `colcon build`.
 
-- Camera is **fixed to the robot flange** (`link6`); the ArUco marker is **fixed in the
-  workspace**. This is the *Eye-in-Hand* configuration.
-- Collects samples only while the robot is **fully stopped**, averages several marker
-  frames per pose, rejects bad detections, solves, and **validates** the result via a
-  closed-loop target-consistency check.
-- Publishes the result as a **static TF** `link6 → camera_color_optical_frame`.
-- Runs **without hardware** via a mock robot + synthetic marker (recovers a known
-  transform exactly).
+## Use case: eye-in-hand
 
-All positions are in **meters**; all rotations are handled as **rotation matrices /
-quaternions** internally. Euler angles are used **only** for GUI/log display.
+The camera is bolted to the flange and moves with the arm; the marker sits
+still in the workspace. What you want is `gripper_T_camera`, the fixed transform
+from the flange to the camera.
 
----
+For each pose the system records where the arm says its flange is
+(`base_T_gripper`) and where the camera says the marker is
+(`camera_T_target`). The marker never moves, so that constraint is enough to
+solve for the camera's mounting — the marker's own position drops out of the
+maths and never has to be measured.
 
-## 2. Packages
+Naming: `A_T_B` means "B expressed in A", so `p_A = A_T_B @ p_B`.
 
-| Package | Type | Contents |
-|---|---|---|
-| `auto_handeye_interfaces` | ament_cmake | msgs (`MarkerDetection`, `RobotState`, `CalibrationStatus`), srvs (`ResetCalibration`, `SaveCalibration`, `LoadCalibration`, `PublishCalibrationTf`, `AddManualSample`), actions (`RunCalibration`, `MoveToCalibrationPose`) |
-| `piper_auto_handeye` | ament_python | all nodes + ROS-free math core + config + launch + tests |
-| `piper_auto_handeye_gui` | ament_python | rqt GUI plugin |
-| `piper_auto_handeye_sim` | ament_python | Gazebo verification rig |
-| `agx_arm_ctrl`, `agx_arm_msgs` | vendored | AgileX ROS 2 arm driver — see `agx_arm_ctrl/VENDOR.md` |
-| `pyagxarm_vendor` | vendored | AgileX `pyAgxArm` SDK — see `pyagxarm_vendor/VENDOR.md` |
-| `piper_msgs` | vendored | old `/pos_cmd` messages, kept only for the mock/Gazebo path |
+## Getting started
 
-Everything the real robot needs is vendored, so a fresh machine is `colcon build`
-and nothing else.
-
-### Nodes
-- `aruco_detector_node` — detects the target marker, publishes `camera_T_target`.
-- `piper_control_node` — **adapter over the arm driver**; publishes `RobotState`, serves the safety-validated `MoveToCalibrationPose` action.
-- `handeye_calibration_node` — the state machine + `RunCalibration` action + services.
-- `calibration_tf_publisher_node` — broadcasts the static result TF.
-- `agx_arm_check` — read-only CAN/SDK pre-flight check (CLI, not a node).
-- `mock_robot_node` — emulates the old driver topics for hardware-free testing.
-- `synthetic_marker_publisher_node` — camera-free marker test double (derives `camera_T_target` from a known ground truth).
-
-### ROS-free core (unit-testable, pure numpy)
-`transform_utils.py`, `calibration_solver.py`, `calibration_validator.py`,
-`pose_filter.py`, `safety_validator.py`, `calibration_io.py`.
-
----
-
-## 3. Design decision: reuse the vendor's driver, don't re-wrap the SDK
-
-`piper_control_node` never opens the CAN bus. It talks to the AgileX ROS 2
-driver `agx_arm_ctrl` (vendored here), which owns the bus via `pyAgxArm`.
-That keeps all the calibration policy — safety limits, goal validation, arrival
-detection, the action server — in one node that does not care how the arm is
-reached, and it is why the mock and Gazebo rigs can stand in for hardware.
-
-Two interchangeable backends, selected by `control_backend`:
-
-**`agx`** (default) — real robot, via `agx_arm_ctrl`:
-
-| Purpose | Topic / service | Type |
-|---|---|---|
-| read pose (`base_T_gripper`) | `feedback/tcp_pose` | `geometry_msgs/PoseStamped` |
-| read status | `feedback/arm_status` | `agx_arm_msgs/AgxArmStatus` |
-| read joints | `feedback/joint_states` | `sensor_msgs/JointState` |
-| move (Cartesian) | `control/move_p` (or `move_l`) | `geometry_msgs/PoseStamped` |
-| enable | `enable_agx_arm` | `std_srvs/SetBool` |
-| speed | `<driver>/set_parameters` → `speed_percent` | `rcl_interfaces/SetParameters` |
-
-**`topic`** — simulation only, the older `/pos_cmd` interface that
-`mock_robot_node` and the Gazebo driver emulate. Not used against hardware; see
-`agx_arm_ctrl/VENDOR.md` for the limitations that motivated the switch.
-
-Both backends feed the same internal state machine, so what you verify in
-Gazebo is the code that runs on the arm.
-
-> **Speed note.** `PoseStamped` carries no speed field, so `piper_control_node`
-> pushes the validated per-goal speed onto the driver's `speed_percent`
-> parameter *before* publishing each goal, and aborts the move if that fails.
-> Without it the arm would run at the driver's default.
-
----
-
-## 4. Transform conventions (READ THIS)
-
-Frame-direction errors are the #1 cause of hand-eye failures. Naming: `A_T_B` = "B
-expressed in A" = maps a point in B to A (`p_A = A_T_B @ p_B`).
-
-- `base_T_gripper` — gripper/flange in robot base (from `/end_pose_stamped`)
-- `camera_T_target` — marker in camera optical frame (from the detector)
-- `gripper_T_camera` — **the calibration result** (camera in gripper)
-- `base_T_target` — used only for validation
-
-**OpenCV `calibrateHandEye` (Eye-in-Hand) mapping:**
-```
-R/t_gripper2base  == base_T_gripper     (our list, per sample)
-R/t_target2cam    == camera_T_target    (our list, per sample)
-returns cam2gripper == gripper_T_camera (the static TF we publish)
-```
-
-**Quaternions are ROS order `(x, y, z, w)`** in all `transform_utils` public functions.
-Convert to `(w, x, y, z)` only at library boundaries via
-`quaternion_ros_to_wxyz` / `quaternion_wxyz_to_ros`.
-
-**Published TF:** parent `link6` → child `camera_color_optical_frame` = `gripper_T_camera`.
-
----
-
-## 5. Frames & topics (defaults, all in config)
-
-- base=`base_link`, gripper=`link6`, camera=`camera_color_optical_frame`, target=`calibration_target`
-- image=`/camera/camera/color/image_raw`, camera_info=`/camera/camera/color/camera_info`
-
-Change them in `config/*.yaml` to match your system.
-
----
-
-## 6. Dependencies & build
+Requires ROS 2 Humble on Ubuntu 22.04.
 
 ```bash
-# ROS 2 Humble, Ubuntu 22.04
 sudo apt install ros-humble-realsense2-camera ros-humble-cv-bridge \
                  ros-humble-tf2-ros ros-humble-rqt-gui-py
 pip install opencv-contrib-python numpy pyyaml   # aruco needs contrib
 
-# Build (from your workspace root)
-cd ~/piper_ros2_ws
-colcon build --symlink-install \
-  --packages-select auto_handeye_interfaces piper_auto_handeye piper_auto_handeye_gui
+mkdir -p ~/piper_ros2_ws && cd ~/piper_ros2_ws
+git clone https://github.com/pjhpjh6698/AgileX-Piper-auto-Hand-eye-Calibration.git autoCali
+cd autoCali
+colcon build
 source install/setup.bash
 ```
-`piper_msgs` (from `Piper_ros`) must be built/sourced for real-robot control; the
-nodes degrade gracefully (mock-only) if it is missing.
 
----
+Build without `--symlink-install`. Mixing the two install layouts leaves the
+console-script wrappers unable to find their package metadata.
 
-## 7. Quick start — hardware-free (recommended first)
+## Usage
 
-Runs the whole state machine with a mock robot and a **camera-free** synthetic marker
-that encodes a known `gripper_T_camera`; the pipeline must recover it.
+### 1. Print a target and measure it
 
-```bash
-ros2 launch piper_auto_handeye mock_calibration.launch.py
-# in another terminal, trigger it:
-ros2 action send_goal /run_calibration auto_handeye_interfaces/action/RunCalibration \
-  "{target_sample_count: 10, auto_move: true, calibration_method: PARK,
-    settle_time: 0.3, observations_per_pose: 3, save_on_success: true}" --feedback
+Print an ArUco marker from `DICT_4X4_50` with ID 1, or a ChArUco board. Then
+measure the print with a ruler and enter what you measured, not what you asked
+the generator for.
+
+This matters more than it looks. The target size is the only scale the pose
+estimate has, so a size that is 10% off puts the camera 10% of the working
+distance away from where it really is — and the rotation still comes out
+perfect, so nothing downstream looks wrong. Printers scale silently: this rig
+lost a day to a board printed at 133.3%, which turned 15 mm squares into 20 mm.
+
+For a ChArUco board, measure the full span and divide, rather than measuring one
+square:
+
 ```
-Result is saved to `~/.ros/piper_auto_handeye/handeye_park_*.yaml`. Publish + verify:
-```bash
-ros2 run piper_auto_handeye calibration_tf_publisher_node \
-  --ros-args -p calibration_file:=$(ls -t ~/.ros/piper_auto_handeye/handeye_park_*.yaml | grep -v samples | head -1)
-ros2 run tf2_ros tf2_echo link6 camera_color_optical_frame
-```
-
----
-
-## 8. Real hardware
-
-### 8a. Start the camera and check it
-```bash
-ros2 launch realsense2_camera rs_launch.py enable_color:=true
-ros2 topic hz /camera/camera/color/image_raw
-ros2 topic echo /camera/camera/color/camera_info --once   # intrinsics present?
+width across all columns / columns  ==  height across all rows / rows
 ```
 
-### 8b0. Which camera
-Two RealSense cameras are attached, and USB enumeration order is not stable, so
-the wrist (eye-in-hand) camera is pinned **by serial number** in
-`real_calibration.launch.py`:
+The two must agree. Enter the result in the GUI, or in `config/aruco.yaml`.
+
+Fix the target rigidly in the workspace where the camera can see it from every
+pose, roughly 20-30 cm in front of the arm.
+
+### 2. Bring up CAN and check the arm answers
 
 ```bash
-ros2 launch piper_auto_handeye real_calibration.launch.py \
-  wrist_camera_serial:=_338522300590      # keep the leading underscore
+bash piper_auto_handeye/scripts/can_setup.sh          # every CAN adapter found
+ros2 run piper_auto_handeye agx_arm_check             # read-only probe
 ```
-That underscore is not a typo — realsense2_camera parses a bare numeric serial
-as an integer and fails to match. List serials with `rs-enumerate-devices -s`.
-The camera comes up under `/wrist/camera/...` with depth off (ArUco needs
-colour only, and two D455s on one USB controller can saturate bandwidth).
 
-### 8b. ArUco marker
-Print a marker from the configured dictionary (`DICT_4X4_50`) with the configured ID
-(`target_marker_id: 1`) and **measure the printed side length**; set `marker_length`
-(meters) in `config/aruco.yaml` to the measured value. Fix the marker rigidly in the
-workspace, visible from all calibration poses.
+`agx_arm_check` never enables the arm and never commands motion. It exits 0 only
+when the link is up, frames are arriving, and the arm decodes a live pose with
+no faults. Do not go past a `NOT READY`.
 
-### 8c. Bring up CAN and prove the arm answers
-```bash
-bash piper_auto_handeye/scripts/can_setup.sh can_follower     # idempotent; needs sudo
-ros2 run piper_auto_handeye agx_arm_check --can-port can_follower
-```
-`agx_arm_check` is read-only — it never enables the arm and never commands
-motion. It exits 0 only when the link is up, frames are arriving, *and* the arm
-decodes a live pose with no faults, so it can gate a launch script. Do not
-proceed past a `NOT READY`.
+Find your interface with `ip -br link show type can` and pass it as
+`--can-port` / `can_port:=` if it is not `can0`.
 
-Find your interface name with `ip -br link show type can`. A leader/follower
-teleop rig has two; the arm that moves and carries the wrist camera is the one
-you want.
-
-### 8d. Everything else
+### 3. Calibrate
 
 ```bash
-# brings up the arm driver, RealSense, detector, control, manager, TF and GUI
 ros2 launch piper_auto_handeye real_calibration.launch.py
 ```
 
-**This launch moves the robot.** Pressing Start in the GUI walks the arm through
-the calibration poses. Before the first run, confirm the poses in
-`config/calibration_poses.yaml` are reachable and collision-free on your robot,
-and start with a hand on the e-stop.
+This launch moves the robot. Keep a hand on the e-stop for the first run.
 
-What protects a run at runtime are the limits in `config/piper.yaml`:
-`workspace_min`/`workspace_max` (goals outside are refused),
-`max_step_distance` (refuses a single move longer than this),
-`max_speed_fraction` (caps the speed pushed to the driver), and the STOP button.
+In the GUI: check the CAN panel is green, pick your target and enter its
+measured size, press Start RViz, then press Start. The arm sweeps its poses and
+stops on its own once it has enough samples. The result appears in the
+`gripper_T_camera` panel and updates after every sample.
 
-To walk the pose list without commanding anything:
+To watch the whole sweep without commanding any motion:
+
 ```bash
 ros2 launch piper_auto_handeye real_calibration.launch.py dry_run:=true
 ```
 
-Two different stops are exposed: `/stop_motion` holds the current pose (the safe
-calibration stop, wired to the GUI's STOP button), while `/hard_stop` cuts drive
-power — **the arm falls**, so use it only when that is the lesser harm.
+### 4. Check the result
 
-### 8e. When the gripper hides the marker (automatic recovery)
+Press Publish TF, and the camera frame appears on the wrist in the embedded
+RViz. Move the arm and watch it: a good calibration keeps the camera frame glued
+where the camera physically sits, and a bad one floats off the gripper or points
+the wrong way.
 
-Eye-in-hand means the gripper sits between the camera and the world, so at some
-poses it simply covers the marker. Skipping those poses quietly removes exactly
-the orientations that make the solve well-conditioned, so the two failure modes
-are now told apart and handled differently:
+Or look at it on its own:
 
-| Symptom | Verdict | Response |
-|---|---|---|
-| marker **never** seen (fewer than `marker_recovery_min_sightings` frames) | occluded | reposition the wrist and re-shoot (`RECOVERING` state) |
-| marker seen, but too few frames pass the quality gate | unstable | stay put, retry with a progressively longer window |
-
-Recovery nudges are tried cheapest-first: back off to widen the field of view
-(no rotation at all), then add small yaw/pitch. They are bounded to 11 cm and
-12°, so the orientation diversity the pose set was designed for survives.
-
-Samples taken from a recovered pose are still valid — the solver consumes the
-`(base_T_gripper, camera_T_target)` **pair**, not the commanded pose.
-
-Detector jitter is fixed at the source rather than papered over with retries:
-OpenCV defaults to `CORNER_REFINE_NONE`, which snaps marker corners to whole
-pixels, and since solvePnP derives the pose from corner positions a one-pixel
-wobble becomes degrees of rotation jitter. `corner_refinement: subpix` is now
-the default in `config/aruco.yaml`.
-
-Tune with `marker_recovery_*` / `marker_retry_*` in `config/handeye.yaml`; set
-`marker_recovery_enabled: false` for the old skip-the-pose behaviour.
-
-Or everything at once (does **not** start the low-level driver):
 ```bash
-ros2 launch piper_auto_handeye bringup.launch.py \
-  use_realsense:=true dry_run:=true use_gui:=true
-```
-
----
-
-## 9. Automatic calibration
-```bash
-ros2 action send_goal /run_calibration auto_handeye_interfaces/action/RunCalibration \
-  "{target_sample_count: 15, auto_move: true, calibration_method: PARK,
-    save_on_success: true}" --feedback
-```
-Flow: system check → for each pose: move → settle → wait for stable marker → average
-N frames → store `(base_T_gripper, camera_T_target)` → repeat → solve → validate
-(optional outlier removal) → save → (publish TF via the service/node).
-
-## 10. Manual calibration (`auto_move:=false`)
-Move the robot yourself (teach/teleop), then capture the current pair:
-```bash
-ros2 action send_goal /run_calibration auto_handeye_interfaces/action/RunCalibration \
-  "{target_sample_count: 15, auto_move: false}" --feedback &
-# each time the robot is stopped at a new pose:
-ros2 service call /add_manual_sample auto_handeye_interfaces/srv/AddManualSample "{}"
-```
-
-## 11. GUI
-```bash
-rqt --standalone piper_auto_handeye_gui
-```
-Camera view, marker/robot status, start/pause/cancel/reset/add-sample, method + target
-count, live progress, result (`gripper_T_camera` t/quat/RPY + RMS), and save/load/publish-TF/log.
-The GUI talks **only** via ROS topics/services/actions; closing it does not stop the
-calibration manager.
-
----
-
-## 12. Services
-```bash
-ros2 service call /reset_calibration  auto_handeye_interfaces/srv/ResetCalibration "{}"
-ros2 service call /save_calibration   auto_handeye_interfaces/srv/SaveCalibration "{path: ''}"
-ros2 service call /load_calibration   auto_handeye_interfaces/srv/LoadCalibration "{path: ''}"
-ros2 service call /publish_calibration_tf auto_handeye_interfaces/srv/PublishCalibrationTf "{path: '', publish: true}"
-```
-
-## 13. Output
-- Result: `~/.ros/piper_auto_handeye/handeye_<method>_<timestamp>.yaml` (translation,
-  quaternion, 4×4 matrix, validation, source).
-- Raw samples: `..._samples.yaml` (per-sample poses + reprojection error, stability,
-  robot-marker Δt, accept/reject reason).
-
-## 14. Verify in RViz
-```bash
-rviz2   # Fixed Frame = base_link; add TF display; confirm the camera frame sits at the flange
+ros2 launch piper_auto_handeye view_calibration.launch.py
 ros2 run tf2_ros tf2_echo link6 camera_color_optical_frame
 ```
 
----
+Results are written to `~/.ros/piper_auto_handeye/handeye_<method>_<time>.yaml`,
+alongside a `_samples.yaml` with every raw sample and why it was accepted.
 
-## 15. Validation & quality
-`base_T_target_i = base_T_gripper_i @ gripper_T_camera @ camera_T_target_i` must be
-(nearly) identical for all i. The validator reports translation/rotation RMS & max,
-flags outliers, and can iteratively drop the worst samples (bounded). Thresholds
-(`maximum_translation_rms_m`, `maximum_rotation_rms_deg`) in `config/handeye.yaml`
-decide SUCCESS / WARNING / FAILED. Recommended **15–25 samples** with rotation about
-**≥ 2 axes** and translation variety; `minimum_samples` floor is 10.
+## Launch arguments
 
-## 16. Tests
+| Argument | Default | Meaning |
+|---|---|---|
+| `dry_run` | `false` | `true` validates the poses without moving the arm |
+| `gui_lang` | `ko` | GUI language; `en` for English |
+| `can_port` | `can0` | socketcan interface the arm is on |
+| `wrist_camera_serial` | (empty) | empty uses the only camera attached |
+| `calibration_method` | `TSAI` | `TSAI`, `PARK`, `HORAUD`, `ANDREFF`, `DANIILIDIS` |
+| `use_gui` | `true` | start the rqt GUI |
+| `use_realsense` | `true` | start the camera |
+| `use_piper_driver` | `true` | start the vendored AgileX driver |
+
+`ros2 launch piper_auto_handeye real_calibration.launch.py --show-args` lists
+them all.
+
+With more than one RealSense attached, pin the wrist one by serial. Keep the
+leading underscore — realsense2_camera reads a bare numeric serial as an integer
+and fails to match:
+
 ```bash
-# ROS-free math (synthetic hand-eye recovery, noise, guards, filter):
-cd src/autoCali/piper_auto_handeye && python3 -m pytest test/ -q
-# or via colcon:
-colcon test --packages-select piper_auto_handeye
+ros2 launch piper_auto_handeye real_calibration.launch.py \
+  wrist_camera_serial:=_123456789012        # rs-enumerate-devices -s
 ```
 
----
+The GUI language can also be set outside the launch file:
 
-## 17. Troubleshooting
-- **`target_id_N_not_seen`** — wrong `target_marker_id`/dictionary, or marker not in view.
-- **`reproj_error_*`** — wrong `marker_length`, motion blur, or bad intrinsics.
-- **`waiting_for_camera_info`** — camera_info topic name wrong or camera not up.
-- **Move rejected "not enabled"** — the adapter auto-enables before a live move
-  (`auto_enable: true`); check `/arm_status` and CAN.
-- **Move rejected "outside workspace"** — tune `workspace_min/max` in `config/piper.yaml`.
-- **Low rotation diversity warning** — add poses that rotate about different axes.
-- **Manager can't move** — is `piper_control_node` (or `mock_robot_node`) running and
-  is the `move_to_calibration_pose` action server up (`ros2 action list`)?
+```bash
+HANDEYE_GUI_LANG=en rqt --standalone piper_auto_handeye_gui.handeye_gui_plugin.HandeyeGuiPlugin
+```
 
-## 18. ⚠️ Safety
-- `dry_run` defaults to **true** everywhere. A live move needs `dry_run:=false` on the
-  control node **and** a per-goal `dry_run=false`.
-- `config/calibration_poses.yaml` poses are **placeholders**, not verified for your
-  robot. Validate reach/collisions in mock + RViz **before** `dry_run:=false`.
-- Workspace bounds, max step distance, max speed, NaN rejection, and timeouts are
-  enforced in `safety_validator.py`. Start slow, stand by the e-stop.
+## Configuration
+
+Frames and thresholds live in `piper_auto_handeye/config/`. The defaults are
+`base_link`, `link6`, `camera_color_optical_frame` and `calibration_target`.
+
+| File | What it holds |
+|---|---|
+| `aruco.yaml` | target type, marker ID and size, board geometry, detector tuning |
+| `handeye.yaml` | frames, solver, sample counts, pose sweep, recovery, thresholds |
+| `piper.yaml` | workspace bounds, step and speed limits |
+
+Worth knowing:
+
+- `target_samples` (30) is how many pose/marker pairs go into the solve.
+  `observations_per_pose` (10) is how many camera frames are averaged into one
+  such pair. Averaging N frames cuts random detection noise by about `sqrt(N)`;
+  beyond 10 the remaining error is systematic and averaging does not touch it.
+- The published TF is retargeted onto `camera_link` (`retarget_frame`), because
+  the RealSense driver already owns `camera_color_optical_frame` and a frame can
+  only have one parent. The `base_link` to optical-frame chain is unchanged.
+
+## FAQ
+
+Why does the solve fail with "not enough rotation diversity"?
+: The poses are too similar. Hand-eye needs rotation about at least two axes.
+  The built-in sweep already does this; if you supplied your own poses, add some
+  that rotate about a different axis.
+
+Why did ChArUco and ArUco disagree by a few centimetres?
+: A wrong target size, almost always. See step 1 — a scale error shows up as
+  pure translation with the rotation still exact, which is what makes it so hard
+  to spot.
+
+The marker is clearly visible but keeps being rejected.
+: Check the reprojection error in the GUI status panel. A high value with a
+  visible marker points at a wrong `marker_length` or bad camera intrinsics.
+  If the value is fine but stability is low, the arm may still be settling —
+  raise `settle_time`.
+
+The arm refuses to move, "outside workspace".
+: The goal is outside `workspace_min`/`workspace_max` in `config/piper.yaml`.
+
+The gripper keeps covering the marker.
+: That is expected in eye-in-hand and is handled: the wrist is nudged and the
+  pose re-shot (the `RECOVERING` state). Tune with `marker_recovery_*` in
+  `config/handeye.yaml`.
+
+## Safety
+
+This launch commands real motion. What protects a run are the limits in
+`config/piper.yaml` — Cartesian workspace bounds, a cap on how far one move may
+travel, a speed cap — plus two stops: `/stop_motion` holds the current pose and
+is what the GUI STOP button calls, while `/hard_stop` cuts drive power and lets
+the arm fall, so use it only when that is the lesser harm.
+
+Run `dry_run:=true` once on a new setup before letting it move.
+
+## Tests
+
+```bash
+colcon test --packages-select piper_auto_handeye piper_auto_handeye_gui
+```
+
+The maths core (`transform_utils`, `calibration_solver`, `calibration_validator`,
+`pose_filter`, `safety_validator`) is ROS-free and tested against synthetic
+hand-eye problems with a known answer.
+
+## Packages
+
+| Package | Contents |
+|---|---|
+| `piper_auto_handeye` | nodes, maths core, config, launch, tests |
+| `piper_auto_handeye_gui` | rqt GUI plugin |
+| `auto_handeye_interfaces` | messages, services, actions |
+| `piper_auto_handeye_sim` | Gazebo verification rig |
+| `agx_arm_description` | vendored URDF and meshes for the RViz robot model |
+| `agx_arm_ctrl`, `agx_arm_msgs`, `pyagxarm_vendor` | vendored AgileX driver and SDK |
+
+`piper_control_node` never opens the CAN bus itself; it talks to the AgileX
+driver, which owns the bus. That keeps the calibration policy — safety limits,
+goal validation, arrival detection — in one node that does not care how the arm
+is reached.
+
+## Vendored third-party code
+
+Copied into this workspace so the whole path builds from one `colcon build`,
+with no `pip install` and no `PYTHONPATH` edits. Attribution is a license
+condition:
+
+| Directory | Upstream | Version | License |
+|---|---|---|---|
+| `agx_arm_ctrl`, `agx_arm_msgs`, `agx_arm_description` | [agx_arm_ros](https://github.com/agilexrobotics/agx_arm_ros) (branch `ros2`) | commit `91e6b2e`, copied 2026-07-27 | Apache-2.0 |
+| `pyagxarm_vendor/pyAgxArm` | [pyAgxArm](https://github.com/agilexrobotics/pyAgxArm) | v1.0.0, commit `cc498c0`, copied 2026-07-27 | MIT |
+
+No upstream `.py` file is modified. `agx_arm_description` carries two mesh
+fixes: the Collada visuals are swapped for the STLs shipped beside them (the
+`.dae` files fail to load in RViz on Humble), and a grey material is declared
+on each visual, because STL carries no colour and RViz renders an untinted
+model entirely in red.
+
+## References
+
+R. Tsai and R. Lenz, "A new technique for fully autonomous and efficient 3D
+robotics hand/eye calibration", IEEE Transactions on Robotics and Automation,
+1989.
+
+The GUI and workflow follow the shape of
+[easy_handeye2](https://github.com/marcoesposito1988/easy_handeye2).

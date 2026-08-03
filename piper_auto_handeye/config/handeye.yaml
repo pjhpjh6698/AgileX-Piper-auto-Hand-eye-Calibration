@@ -5,7 +5,7 @@
 
     calibration_method: TSAI          # Tsai-Lenz. Alt: PARK|HORAUD|ANDREFF|DANIILIDIS
     minimum_samples: 10               # hard floor for solving (recommended 15-25)
-    target_samples: 15
+    target_samples: 30
 
     # Frames (must match piper.yaml / aruco.yaml)
     base_frame: base_link
@@ -19,7 +19,10 @@
     # needs to cover residual vibration -- 0.7 is plenty for the Piper.
     settle_time: 0.7
     observations_per_pose: 10         # marker frames averaged per pose
-    marker_timeout: 5.0               # s to wait for a valid marker per pose
+    # Short on purpose: a pose where the marker is missing or only partially
+    # in view will not improve by staring at it. Fail the attempt in 2 s and
+    # let the recovery logic reposition (or move on) instead.
+    marker_timeout: 2.0               # s to wait for a valid marker per pose
     marker_stability_min: 0.6         # min PoseFilter stability score to accept
     maximum_pose_time_difference: 0.2 # s between robot pose and marker pose
     # 0 = duplicate-orientation gate OFF. Redundant poses are deliberately
@@ -41,7 +44,7 @@
     #   marker NEVER seen      -> occluded  -> reposition the wrist
     #   marker seen but noisy  -> unstable  -> stay put, retry with a longer window
     marker_recovery_enabled: true
-    marker_recovery_max_attempts: 5        # repositions tried before giving up on a pose
+    marker_recovery_max_attempts: 3        # repositions tried before giving up on a pose
     marker_recovery_translation_step: 0.05 # m, standoff added per recovery step
     marker_recovery_rotation_step_deg: 12.0  # deg, wrist yaw/pitch per recovery step
     marker_recovery_min_sightings: 3       # detected frames needed to call it "visible"
@@ -49,12 +52,13 @@
     # Persistence when the marker IS visible but the detector is jittery.
     # Each retry widens the window by marker_retry_timeout_growth, so the
     # effective wait is marker_timeout * (1 + g + g^2 + ...).
-    marker_retry_in_place: 3
+    # 1 retry in place: with 22+ poses in the sweep, moving on beats waiting.
+    marker_retry_in_place: 1
     marker_retry_timeout_growth: 1.5
     marker_recovery_joint_step_deg: 8.0    # wrist-joint nudge per recovery step
 
     # ---- Down-looking home ------------------------------------------------
-    # TAUGHT configuration: the leader arm on can_master was posed by hand at
+    # TAUGHT configuration: a leader arm was posed by hand at
     # the desired viewing angle and its joints read back (2026-07-27). Flange
     # lands at (0.203, -0.006, 0.323), tilted 22 deg from vertical. Only j5 was
     # pulled from 68.8 to 66.0 deg -- the demonstrated value sat 1.2 deg from
@@ -89,6 +93,10 @@
     serp_row_step: 0.03               # m between passes along -y
     serp_twist_deg: 25.0              # per-stop twist about the aiming axis
     serp_orientations_per_stop: 2     # poses per stop (1..3)
+    # Extra poses that differ ONLY by joint-6 roll. Rolling the last joint
+    # spins the camera about its own axis: pure rotation, no translation, and
+    # the marker stays in frame -- the cheapest rotation diversity available.
+    serp_j6_extra_deg: [15.0, -15.0]
     aim_distance: 0.25                # m from home flange to the aim point
     # Aiming from lattice corners tilts the view; the cone must leave room.
     gen_down_cone_deg: 45.0
@@ -106,3 +114,14 @@
     # Output
     output_directory: ""              # "" => ~/.ros/piper_auto_handeye
     save_on_success: true
+
+    # ---- Publishing the result as TF ------------------------------------
+    # The calibration measures gripper -> camera OPTICAL frame, but the
+    # RealSense driver already owns that frame (camera_link ->
+    # camera_color_frame -> camera_color_optical_frame). Publishing onto it
+    # would give the optical frame two parents, which SPLITS the tf2 tree and
+    # makes base_link -> camera unresolvable in RViz. So the edge is
+    # re-targeted onto the camera root instead; the maths is identical.
+    # Set to "" when no camera driver runs (offline replay of a result).
+    retarget_frame: camera_link
+    retarget_timeout: 5.0             # s to wait for the driver's static TF

@@ -155,6 +155,8 @@ class HandeyeCalibrationNode(Node):
         self.serp_col_step = float(p("serp_col_step", 0.035).value)   # m along x
         self.serp_row_step = float(p("serp_row_step", 0.03).value)    # m along -y
         self.serp_twist_deg = float(p("serp_twist_deg", 25.0).value)
+        # Extra poses per stop that differ ONLY by joint-6 roll [deg].
+        self.serp_j6_extra_deg = list(p("serp_j6_extra_deg", [15.0, -15.0]).value)
         self.serp_orients = int(p("serp_orientations_per_stop", 2).value)
         # distance from the home flange, along its viewing axis, to the point
         # every stop aims at (~= camera-to-marker distance at home)
@@ -176,6 +178,7 @@ class HandeyeCalibrationNode(Node):
         self._robot_buf = deque(maxlen=400)    # (stamp_sec, RobotState)
         self._latest_marker: Optional[MarkerDetection] = None
         self._latest_robot: Optional[RobotState] = None
+        self._live = None                # running estimate for the GUI panel
 
         cb = ReentrantCallbackGroup()
         self.create_subscription(MarkerDetection, "marker_detection",
@@ -260,6 +263,22 @@ class HandeyeCalibrationNode(Node):
         if val is not None:
             st.translation_rms = float(val.translation_rms_m)
             st.rotation_rms_deg = float(val.rotation_rms_deg)
+        with self._lock:
+            live = self._live
+        if live is not None:
+            st.live_valid = True
+            st.live_sample_count = int(live["n"])
+            st.live_translation_rms = live["t_rms"]
+            st.live_rotation_rms_deg = live["r_rms"]
+            R, t = tu.decompose_transform(live["T"])
+            q = tu.matrix_to_quaternion(R)
+            st.live_gripper_to_camera.translation.x = float(t[0])
+            st.live_gripper_to_camera.translation.y = float(t[1])
+            st.live_gripper_to_camera.translation.z = float(t[2])
+            st.live_gripper_to_camera.rotation.x = float(q[0])
+            st.live_gripper_to_camera.rotation.y = float(q[1])
+            st.live_gripper_to_camera.rotation.z = float(q[2])
+            st.live_gripper_to_camera.rotation.w = float(q[3])
         self.status_pub.publish(st)
 
     # ------------------------------------------------------------------ #
@@ -408,6 +427,7 @@ class HandeyeCalibrationNode(Node):
 
         rows, cols = self.serp_rows, self.serp_cols
         col_off = [(c - (cols - 1) / 2.0) * self.serp_col_step for c in range(cols)]
+        j6_extra = [v for v in self.serp_j6_extra_deg if abs(v) > 1e-6]
         twists = ([0.0] if self.serp_orients <= 1 else
                   [-self.serp_twist_deg, +self.serp_twist_deg]
                   if self.serp_orients == 2 else
@@ -469,6 +489,18 @@ class HandeyeCalibrationNode(Node):
                         continue
                     q_seed = q                       # chain: next IK starts nearby
                     poses.append(("joints", [float(v) for v in q]))
+                    # Extra wrist-roll variants, applied straight to joint 6.
+                    # Rolling the last joint spins the camera about its own
+                    # axis: pure rotation, zero translation, marker stays in
+                    # frame -- the cheapest orientation diversity there is, and
+                    # exactly what conditions the hand-eye rotation estimate.
+                    for extra in j6_extra:
+                        q6 = np.array(q, dtype=float)
+                        q6[5] += math.radians(extra)
+                        if ak.within_joint_limits(q6, margin_deg=3.0):
+                            poses.append(("joints", [float(v) for v in q6]))
+                        else:
+                            dropped += 1
 
         if len(poses) < 6:
             self.get_logger().warn(
@@ -476,7 +508,8 @@ class HandeyeCalibrationNode(Node):
                 f"({dropped} dropped); falling back to the pose file")
             return None
         self.get_logger().info(
-            f"ㄹ sweep: {rows} rows x {cols} cols x {len(twists)} twists -> "
+            f"ㄹ sweep: {rows} rows x {cols} cols x {len(twists)} twists "
+            f"(+{len(j6_extra)} joint6 rolls) -> "
             f"{len(poses)} poses aiming at ({aim[0]:.3f}, {aim[1]:.3f}, {aim[2]:.3f})"
             f" ({dropped} dropped)")
         return poses
@@ -693,16 +726,25 @@ class HandeyeCalibrationNode(Node):
         cam_poses = []
         sightings = 0                      # frames where the marker was found at all
         reason = "marker_timeout"
+        last_stamp = None
         while time.time() < deadline and len(cam_poses) < obs:
             if self._cancel.is_set() or not rclpy.ok():
                 return OUTCOME_ABORT
             robot_T, marker_T, dt, mdet, rstate = self._get_synced_pair()
+            # This loop polls faster than the camera produces frames, so without
+            # a stamp check the same detection is consumed several times. That
+            # matters: averaging a frame with a copy of itself cancels no noise,
+            # so observations_per_pose would buy far less accuracy than its name
+            # promises, and 'sightings' would overcount what the detector saw.
+            stamp = self._stamp_sec(mdet.header) if mdet is not None else None
+            if stamp is not None and stamp == last_stamp:
+                time.sleep(0.005)
+                continue
+            last_stamp = stamp
             # Count every frame the detector actually found the marker in, even
             # if we then reject it for quality. That is what separates "the
             # gripper is covering it" from "the detection is noisy".
-            with self._lock:
-                latest = self._latest_marker
-            if latest is not None and latest.detected:
+            if mdet is not None and mdet.detected:
                 sightings += 1
             if robot_T is None or marker_T is None:
                 time.sleep(0.02)
@@ -956,6 +998,15 @@ class HandeyeCalibrationNode(Node):
                     f"rms={val.translation_rms_m * 1000:.1f}mm/"
                     f"{val.rotation_rms_deg:.2f}deg")
             self.get_logger().info(f"LIVE {self.method} n={len(base)}: {line}")
+            # Hand the running estimate to the GUI so the Result panel updates
+            # after every pose instead of staying blank until the run ends.
+            with self._lock:
+                self._live = {
+                    "T": res.gripper_T_camera.copy(),
+                    "n": len(base),
+                    "t_rms": float(val.translation_rms_m),
+                    "r_rms": float(val.rotation_rms_deg),
+                }
             return line
         except Exception as exc:  # noqa: BLE001 - degenerate sample sets throw
             self.get_logger().debug(f"live solve skipped: {exc}")
@@ -1099,32 +1150,22 @@ class HandeyeCalibrationNode(Node):
         self._publish_status()
 
     def _save_result(self, solve_result, val, method, output_path):
+        # ONE well-known file, overwritten on every save. Timestamped copies
+        # and sample dumps used to pile up here; now the newest result is
+        # always the same path, in the minimal easy_handeye2-style format.
         ts = datetime.datetime.now().strftime("%Y%m%dT%H%M%S")
         path = output_path if output_path else os.path.join(
-            self.output_dir, f"handeye_{method.lower()}_{ts}.yaml")
+            self.output_dir, cio.RESULT_FILENAME)
         validation = {
             "sample_count": val.sample_count,
             "translation_rms_m": round(val.translation_rms_m, 6),
-            "translation_max_m": round(val.translation_max_m, 6),
             "rotation_rms_deg": round(val.rotation_rms_deg, 5),
-            "rotation_max_deg": round(val.rotation_max_deg, 5),
-        }
-        source = {
-            "robot": "Piper",
-            "camera": "RealSense",
-            "method": method,
         }
         d = cio.build_result_dict(
             solve_result.gripper_T_camera, self.gripper_frame, self.camera_frame,
-            method, ts, validation, source)
+            method, ts, validation, {})
         cio.save_result(d, path)
-        # also dump raw samples
-        with self._lock:
-            samples = [cio.sample_to_dict(s.pose_index, s.base_T_gripper,
-                                          s.camera_T_target, s.meta)
-                       for s in self._samples]
-        cio.save_samples(samples, path.replace(".yaml", "_samples.yaml"))
-        self.get_logger().info(f"saved calibration -> {path}")
+        self.get_logger().info(f"saved calibration -> {path} (overwritten)")
         return path
 
     def _load_calibration_poses(self):
@@ -1216,6 +1257,7 @@ class HandeyeCalibrationNode(Node):
 
         with self._lock:
             self._samples.clear()
+            self._live = None
             self._state = IDLE
             self._last_result = None
             self._last_validation = None

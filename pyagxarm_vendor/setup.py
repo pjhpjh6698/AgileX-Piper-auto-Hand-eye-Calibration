@@ -6,7 +6,7 @@ install/setup.bash` with no pip install and no PYTHONPATH juggling.
 
 `agx_arm_ctrl` imports it, and so does the calibration stack's pre-flight
 check. The sources under ``pyAgxArm/`` are upstream v1.0.0, unmodified --
-see VENDOR.md before touching them.
+see section 19 of the workspace README before touching them.
 """
 from setuptools import find_packages, setup
 

@@ -11,7 +11,7 @@ from sensor_msgs.msg import JointState
 from builtin_interfaces.msg import Time
 from std_srvs.srv import SetBool, Empty
 from geometry_msgs.msg import Pose, PoseStamped, PoseArray
-from rcl_interfaces.msg import SetParametersResult   # LOCAL PATCH, see VENDOR.md
+from rcl_interfaces.msg import SetParametersResult   # LOCAL PATCH, see below
 from scipy.spatial.transform import Rotation as R
 
 from agx_arm_msgs.msg import (
@@ -91,7 +91,7 @@ class AgxArmRosNode(Node):
         ### services
         self._setup_services()
 
-        ### LOCAL PATCH (see VENDOR.md): make speed_percent settable at runtime.
+        ### LOCAL PATCH: make speed_percent settable at runtime.
         # Upstream reads speed_percent once at startup, so `ros2 param set` (and
         # anything using the parameter service) changed the stored value while
         # the arm kept running at the launch-time speed. A calibration run needs

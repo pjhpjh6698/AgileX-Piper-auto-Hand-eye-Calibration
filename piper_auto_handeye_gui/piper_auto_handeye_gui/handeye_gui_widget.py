@@ -33,9 +33,10 @@ from python_qt_binding.QtGui import QImage, QPixmap
 from python_qt_binding.QtWidgets import (
     QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QGridLayout, QGroupBox,
     QHBoxLayout, QLabel, QPlainTextEdit, QProgressBar, QPushButton, QSpinBox,
-    QSplitter, QVBoxLayout, QWidget)
+    QSizePolicy, QSplitter, QVBoxLayout, QWidget)
 
-from rcl_interfaces.srv import GetParameters, SetParameters
+from rcl_interfaces.srv import (GetParameters, SetParameters,
+                                SetParametersAtomically)
 from rclpy.parameter import Parameter
 from sensor_msgs.msg import Image
 from std_srvs.srv import Trigger
@@ -49,6 +50,8 @@ from auto_handeye_interfaces.msg import CalibrationStatus, MarkerDetection, Robo
 from auto_handeye_interfaces.srv import (AddManualSample, LoadCalibration,
                                          PublishCalibrationTf, ResetCalibration,
                                          SaveCalibration)
+
+from piper_auto_handeye_gui.i18n import tr
 
 METHODS = ["TSAI", "PARK", "HORAUD", "ANDREFF", "DANIILIDIS"]
 
@@ -81,6 +84,47 @@ def _ok_label(text, ok):
     return f'<span style="color:{color};font-weight:bold;">{text}</span>'
 
 
+# --- X11 window adoption (for embedding RViz) ---------------------------- #
+# RViz2 has no Python bindings on Humble, so it cannot be built as a Qt widget;
+# the only way to show it inside this GUI is to adopt its X window. Qt's
+# createWindowContainer does not manage foreign, already-mapped windows (it
+# leaves RViz painting at its own screen coordinates on top of everything), so
+# the reparent is done through libX11 directly. ctypes keeps this dependency
+# free -- no python-xlib, no xdotool.
+def _x11():
+    import ctypes
+    import ctypes.util
+    lib = ctypes.CDLL(ctypes.util.find_library("X11"))
+    lib.XOpenDisplay.restype = ctypes.c_void_p
+    return ctypes, lib
+
+
+def _x11_reparent(child, parent):
+    """Move a foreign top-level window into ``parent``.
+
+    Unmapping first is essential: a window manager owns a mapped top-level and
+    reclaims it if it is reparented in place.
+    """
+    import time as _t
+    ctypes, lib = _x11()
+    dpy = ctypes.c_void_p(lib.XOpenDisplay(None))
+    lib.XUnmapWindow(dpy, ctypes.c_ulong(child))
+    lib.XSync(dpy, False)
+    _t.sleep(0.2)
+    lib.XReparentWindow(dpy, ctypes.c_ulong(child), ctypes.c_ulong(parent), 0, 0)
+    lib.XSync(dpy, False)
+    lib.XMapWindow(dpy, ctypes.c_ulong(child))
+    lib.XSync(dpy, False)
+
+
+def _x11_move_resize(win, width, height):
+    ctypes, lib = _x11()
+    dpy = ctypes.c_void_p(lib.XOpenDisplay(None))
+    lib.XMoveResizeWindow(dpy, ctypes.c_ulong(win), 0, 0,
+                          ctypes.c_uint(int(width)), ctypes.c_uint(int(height)))
+    lib.XFlush(dpy)
+
+
 class HandeyeGuiWidget(QWidget):
     """Main GUI panel. All ROS traffic is funnelled through Qt signals."""
 
@@ -105,9 +149,12 @@ class HandeyeGuiWidget(QWidget):
         self._paused = False
         self._last_saved_path = ""
         self._closing = False
-        self._can_port = "can_follower"      # refreshed from the driver's parameter
+        self._can_port = "can0"              # refreshed from the driver's parameter
         self._arm_connected = False          # last RobotState.connected
         self._can_busy = False               # a bring-up is in flight
+        # while False the Result panel tracks the live estimate; the final
+        # result latches it so a finished run is never overwritten
+        self._have_final_result = False
 
         self._build_ui()
         self._connect_signals()
@@ -143,18 +190,225 @@ class HandeyeGuiWidget(QWidget):
         root = QVBoxLayout(self)
 
         # ---- safety banner ----
-        self.banner = QLabel("dry_run 상태 확인 중...")
+        self.banner = QLabel(tr("dry_run 상태 확인 중..."))
         self.banner.setAlignment(Qt.AlignCenter)
         self.banner.setStyleSheet(
             "background:#455a64;color:#fff;font-weight:bold;padding:6px;")
         root.addWidget(self.banner)
 
+        # camera+log | embedded RViz | controls -- RViz gets the widest share
+        # because judging a calibration is a 3D task.
         splitter = QSplitter(Qt.Horizontal)
         splitter.addWidget(self._build_left())
+        splitter.addWidget(self._build_rviz_pane())
         splitter.addWidget(self._build_right())
-        splitter.setStretchFactor(0, 3)
-        splitter.setStretchFactor(1, 2)
+        splitter.setStretchFactor(0, 2)
+        # RViz gets the most room: judging a calibration is a 3D task.
+        splitter.setStretchFactor(1, 5)
+        splitter.setStretchFactor(2, 2)
         root.addWidget(splitter, 1)
+
+    # -------------------------- rviz pane ----------------------------- #
+    def _build_rviz_pane(self):
+        """A live RViz2 view INSIDE the GUI.
+
+        RViz2 ships no Python bindings on Humble, so it cannot be constructed
+        as a Qt widget. What does work on X11 is adoption: run rviz2 as a
+        child process, find the X window it creates (matched by PID via
+        xprop, so someone else's RViz is never captured), wrap it with
+        QWindow.fromWinId and reparent it into this layout. From then on it
+        lives inside the GUI -- when the calibration TF is published the
+        camera frame pops onto the wrist right here.
+        """
+        box = QGroupBox(tr("RViz (로봇 + 캘리브레이션 TF)"))
+        lay = QVBoxLayout(box)
+        self.lbl_rviz = QLabel(tr("RViz가 실행되지 않았습니다.\n"
+                                  "[RViz 시작]을 누르면 이 안에 표시됩니다."))
+        self.lbl_rviz.setAlignment(Qt.AlignCenter)
+        self.lbl_rviz.setStyleSheet("color:#90a4ae;")
+        self.btn_rviz = QPushButton(tr("RViz 시작"))
+        self.btn_rviz.setStyleSheet(
+            "background:#37474f;color:#fff;font-weight:bold;padding:6px;")
+        # The container must be created with ITS FINAL PARENT (this pane) and
+        # never reparented afterwards: Qt's foreign-window containers are
+        # documented not to survive reparenting, and moving one between
+        # widgets is exactly what leaves rviz stranded as a separate window.
+        self._rviz_pane = box
+        self._rviz_layout = lay
+        self._rviz_container = None
+        self._rviz_proc = None
+        self._rviz_embed_deadline = 0.0
+        self._rviz_seen_at = None
+        self._rviz_wid = None
+        self._rviz_window = None
+        lay.addWidget(self.lbl_rviz, 1)
+        lay.addWidget(self.btn_rviz)
+        return box
+
+    def _start_rviz(self):
+        import subprocess
+        if self._rviz_proc is not None and self._rviz_proc.poll() is None:
+            self._log(tr("RViz는 이미 실행 중입니다"))
+            return
+        try:
+            from ament_index_python.packages import get_package_share_directory
+            cfg = os.path.join(get_package_share_directory("piper_auto_handeye"),
+                               "rviz", "calibration.rviz")
+        except Exception:  # noqa: BLE001
+            cfg = ""
+        cmd = ["rviz2"] + (["-d", cfg] if cfg and os.path.exists(cfg) else [])
+        try:
+            self._rviz_proc = subprocess.Popen(
+                cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except FileNotFoundError:
+            self._log(tr("FAIL: rviz2 실행 파일을 찾을 수 없습니다"))
+            return
+        self._log(tr("RViz 시작... 창을 GUI 안으로 가져옵니다"))
+        self.btn_rviz.setEnabled(False)
+        self.lbl_rviz.setText(tr("RViz 창을 기다리는 중..."))
+        import time as _t
+        self._rviz_embed_deadline = _t.time() + 20.0
+        self._rviz_seen_at = None
+        self._rviz_timer = QTimer(self)
+        self._rviz_timer.timeout.connect(self._try_embed_rviz)
+        self._rviz_timer.start(400)
+
+    def _find_rviz_window(self):
+        """X window id of OUR rviz2 process, or None.
+
+        Candidates come from the window tree (class "rviz2"); ownership is
+        confirmed through _NET_WM_PID so a pre-existing RViz someone else
+        opened is never adopted.
+        """
+        import re
+        import subprocess
+        try:
+            tree = subprocess.run(["xwininfo", "-root", "-tree"],
+                                  capture_output=True, text=True, timeout=3).stdout
+        except Exception:  # noqa: BLE001
+            return None
+        # rviz2 owns SEVERAL X windows (tooltips, utility popups) that all
+        # carry the same class and PID. Embedding whichever happens to appear
+        # first in the tree can adopt a 1x1 helper while the real window stays
+        # on the desktop -- so pick the LARGEST candidate, and ignore anything
+        # too small to be a main window.
+        best, best_area = None, 0
+        for m in re.finditer(
+                r'(0x[0-9a-f]+)[^\n]*\("rviz2" "rviz2"\)[^\n]*?(\d+)x(\d+)\+',
+                tree):
+            wid, w_px, h_px = m.group(1), int(m.group(2)), int(m.group(3))
+            if w_px < 300 or h_px < 200:
+                continue
+            try:
+                out = subprocess.run(["xprop", "-id", wid, "_NET_WM_PID"],
+                                     capture_output=True, text=True, timeout=2).stdout
+                pid = int(out.split("=")[-1].strip())
+            except Exception:  # noqa: BLE001
+                continue
+            if (self._rviz_proc is not None and pid == self._rviz_proc.pid
+                    and w_px * h_px > best_area):
+                best, best_area = int(wid, 16), w_px * h_px
+        return best
+
+    def _try_embed_rviz(self):
+        import time as _t
+        if self._rviz_proc is None or self._rviz_proc.poll() is not None:
+            self._rviz_timer.stop()
+            self.btn_rviz.setEnabled(True)
+            self.lbl_rviz.setText(tr("RViz 프로세스가 종료되었습니다. 다시 시작하세요."))
+            return
+        wid = self._find_rviz_window()
+        if wid is None:
+            if _t.time() > self._rviz_embed_deadline:
+                self._rviz_timer.stop()
+                self.btn_rviz.setEnabled(True)
+                self._log(tr("RViz 창을 찾지 못해 별도 창으로 둡니다 (기능은 동일)"))
+            return
+        # Let RViz finish building its layout before adoption: reparenting a
+        # window that is still being mapped is what leaves it drawn on the
+        # desktop instead of inside the container.
+        if self._rviz_seen_at is None:
+            self._rviz_seen_at = _t.time()
+            return
+        if _t.time() - self._rviz_seen_at < 1.5:
+            return
+        self._rviz_timer.stop()
+        try:
+            # Qt's createWindowContainer cannot manage a foreign, already-mapped
+            # window: it leaves RViz drawing at its own coordinates on top of
+            # the GUI. Reparent at the X11 level instead -- and unmap first, or
+            # the window manager (which owns a mapped top-level) reclaims it.
+            host = QWidget(self._rviz_pane)
+            host.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)
+            host.setMinimumSize(320, 240)
+            host.setStyleSheet("background:#202020;")
+            self._rviz_layout.removeWidget(self.lbl_rviz)
+            self.lbl_rviz.hide()
+            self._rviz_layout.insertWidget(0, host, 1)
+            host.show()
+            self._rviz_container = host
+            _x11_reparent(wid, int(host.winId()))
+            _x11_move_resize(wid, host.width(), host.height())
+            # RViz must follow the pane whenever the splitter or window resizes.
+            host.resizeEvent = self._on_rviz_container_resize
+        except Exception as exc:  # noqa: BLE001 - keep rviz usable standalone
+            self.btn_rviz.setEnabled(True)
+            self.btn_rviz.setText(tr("RViz 시작"))
+            self._log(tr("FAIL: RViz 내장 실패 ({}); 별도 창으로 사용하세요").format(exc))
+            return
+        self._rviz_wid = wid
+        self.btn_rviz.setText(tr("RViz 실행 중 (내장됨)"))
+        # Trust nothing: verify the adoption actually took by checking the
+        # rviz window now sits INSIDE our top-level window's geometry.
+        QTimer.singleShot(1200, self._verify_rviz_embed)
+
+    def _on_rviz_container_resize(self, event):
+        self._sync_rviz_geometry()
+
+    def _sync_rviz_geometry(self):
+        """Make the adopted window exactly fill its host widget."""
+        if self._rviz_container is None or self._rviz_wid is None:
+            return
+        _x11_move_resize(self._rviz_wid,
+                         max(1, self._rviz_container.width()),
+                         max(1, self._rviz_container.height()))
+
+    def _verify_rviz_embed(self):
+        """Confirm the adoption landed IN THE PANE, not merely on the window.
+
+        Checking against the whole GUI rectangle is too weak: a foreign window
+        drawn over the camera pane also passes that. Compare against the
+        container's own screen rectangle instead.
+        """
+        import re
+        import subprocess
+        self._sync_rviz_geometry()
+        try:
+            info = subprocess.run(["xwininfo", "-id", hex(self._rviz_wid)],
+                                  capture_output=True, text=True, timeout=3).stdout
+            rx = int(re.search(r"Absolute upper-left X:\s*(-?\d+)", info).group(1))
+            ry = int(re.search(r"Absolute upper-left Y:\s*(-?\d+)", info).group(1))
+            c = self._rviz_container
+            tl = c.mapToGlobal(c.rect().topLeft())
+            dx, dy = abs(rx - tl.x()), abs(ry - tl.y())
+            aligned = dx <= 12 and dy <= 12
+        except Exception:  # noqa: BLE001 - verification is best-effort
+            return
+        if aligned:
+            self._log(tr("OK: RViz를 GUI 패널 안에 내장했습니다. Publish TF를 누르면 "
+                         "카메라 프레임이 손목 위에 나타납니다."))
+        else:
+            self._log(tr("WARN: RViz가 패널 위치와 어긋나 있습니다 "
+                         "(rviz@({},{}) vs 패널@({},{}))")
+                      .format(rx, ry, tl.x(), tl.y()))
+
+    def _stop_rviz(self):
+        if self._rviz_proc is not None and self._rviz_proc.poll() is None:
+            self._rviz_proc.terminate()
+            try:
+                self._rviz_proc.wait(timeout=3)
+            except Exception:  # noqa: BLE001
+                self._rviz_proc.kill()
 
     # -------------------------- left column --------------------------- #
     def _build_left(self):
@@ -163,7 +417,8 @@ class HandeyeGuiWidget(QWidget):
 
         cam_box = QGroupBox("Camera (debug_image)")
         cam_lay = QVBoxLayout(cam_box)
-        self.image_label = QLabel("영상 없음\n(aruco_detector_node 미실행 또는 카메라 없음)")
+        self.image_label = QLabel(
+            tr("영상 없음\n(aruco_detector_node 미실행 또는 카메라 없음)"))
         self.image_label.setAlignment(Qt.AlignCenter)
         self.image_label.setMinimumSize(480, 360)
         self.image_label.setStyleSheet("background:#212121;color:#9e9e9e;")
@@ -208,16 +463,16 @@ class HandeyeGuiWidget(QWidget):
         # First thing that goes wrong on a fresh boot is the CAN link, and it is
         # invisible from the rest of the GUI: with no link every pose just fails
         # safety validation with "robot not connected". Surface it explicitly.
-        canbox = QGroupBox("로봇 연결 (CAN)")
+        canbox = QGroupBox(tr("로봇 연결 (CAN)"))
         cg = QGridLayout(canbox)
-        self.lbl_can_link = QLabel("링크: 확인 중...")
-        self.lbl_can_arm = QLabel("팔: 확인 중...")
+        self.lbl_can_link = QLabel(tr("링크: 확인 중..."))
+        self.lbl_can_arm = QLabel(tr("팔: 확인 중..."))
         self.lbl_can_link.setStyleSheet("font-family:monospace;")
         self.lbl_can_arm.setStyleSheet("font-family:monospace;")
-        self.btn_can = QPushButton("CAN 연결")
+        self.btn_can = QPushButton(tr("CAN 연결"))
         self.btn_can.setStyleSheet(
             "background:#00695c;color:#fff;font-weight:bold;padding:8px;")
-        self.btn_can_refresh = QPushButton("상태 확인")
+        self.btn_can_refresh = QPushButton(tr("상태 확인"))
         cg.addWidget(self.lbl_can_link, 0, 0, 1, 2)
         cg.addWidget(self.lbl_can_arm, 1, 0, 1, 2)
         cg.addWidget(self.btn_can, 2, 0)
@@ -231,7 +486,7 @@ class HandeyeGuiWidget(QWidget):
         self.cmb_method.addItems(METHODS)
         self.spn_samples = QSpinBox()
         self.spn_samples.setRange(3, 100)
-        self.spn_samples.setValue(15)
+        self.spn_samples.setValue(30)
         self.spn_settle = QDoubleSpinBox()
         self.spn_settle.setRange(0.0, 10.0)
         self.spn_settle.setSingleStep(0.1)
@@ -240,18 +495,25 @@ class HandeyeGuiWidget(QWidget):
         self.spn_obs = QSpinBox()
         self.spn_obs.setRange(1, 50)
         self.spn_obs.setValue(10)
-        self.chk_auto = QCheckBox("자동 이동 (auto_move)")
+        self.spn_obs.setToolTip(tr(
+            "한 자세에 멈춰 있는 동안 평균낼 마커 관측 프레임 수.\n"
+            "N장을 평균내면 검출 노이즈가 약 √N배 줄어듭니다 (10장 ≈ 3배).\n"
+            "Target samples와는 다른 축입니다: 이 N장이 모여 샘플 1개가 됩니다.\n"
+            "너무 크게 잡으면 marker_timeout 안에 못 채워 자세를 건너뜁니다."))
+        self.spn_samples.setToolTip(tr(
+            "최종 솔브에 넣을 (로봇자세, 마커자세) 쌍의 개수."))
+        self.chk_auto = QCheckBox(tr("자동 이동 (auto_move)"))
         self.chk_auto.setChecked(True)
-        self.chk_save = QCheckBox("성공 시 자동 저장")
+        self.chk_save = QCheckBox(tr("성공 시 자동 저장"))
         self.chk_save.setChecked(True)
         # Calibration target: single ArUco marker (default) or a ChArUco board.
         # Switching pushes target_type to the detector at runtime.
         self.cmb_target = QComboBox()
-        self.cmb_target.addItems(["ArUco 마커", "ChArUco 보드"])
+        self.cmb_target.addItems([tr("ArUco 마커"), tr("ChArUco 보드")])
         # ArUco marker identity: which ID to track and its printed side length.
         # marker_length scales every camera_T_target translation, so it must
         # match the PHYSICAL marker (measure it!) -- editable here and pushed
-        # to the detector with the 적용 button.
+        # to the detector with the Apply button.
         self.spn_marker_id = QSpinBox()
         self.spn_marker_id.setRange(0, 249)
         self.spn_marker_id.setValue(1)
@@ -261,7 +523,7 @@ class HandeyeGuiWidget(QWidget):
         self.spn_marker_len.setSingleStep(1.0)
         self.spn_marker_len.setValue(70.0)
         self.spn_marker_len.setSuffix(" mm")
-        self.btn_marker_apply = QPushButton("마커 설정 적용")
+        self.btn_marker_apply = QPushButton(tr("마커 설정 적용"))
         self.btn_marker_apply.setStyleSheet(
             "background:#37474f;color:#fff;padding:4px;")
         g.addWidget(QLabel("Target"), 0, 0)
@@ -282,6 +544,67 @@ class HandeyeGuiWidget(QWidget):
         g.addWidget(self.chk_auto, 8, 0, 1, 2)
         g.addWidget(self.chk_save, 9, 0, 1, 2)
         lay.addWidget(cfg)
+
+        # ---- ChArUco board geometry (calib.io generator fields) ----
+        # These must match the PRINTED board exactly -- rows/columns, checker
+        # size and the marker size inside the white squares -- or the board
+        # pose is silently wrong. Shown only in ChArUco mode.
+        self.board_box = QGroupBox(tr("ChArUco 보드 설정 (calib.io 규격)"))
+        bg = QGridLayout(self.board_box)
+        # Defaults = the calib.io spec for this rig (11 x 8 @ 15 mm, DICT_4X4,
+        # Start ID 1), i.e. a 165 x 120 mm printed pattern.
+        # MEASURE a freshly printed board before trusting these: the first print
+        # came out at 133.3% (72-vs-96 DPI), giving 20 mm squares while the app
+        # still assumed 15, which put a 4 cm error in gripper_T_camera with the
+        # rotation still perfect -- an error nothing downstream can detect.
+        self.spn_board_cols = QSpinBox()
+        self.spn_board_cols.setRange(3, 30)
+        self.spn_board_cols.setValue(11)
+        self.spn_board_rows = QSpinBox()
+        self.spn_board_rows.setRange(3, 30)
+        self.spn_board_rows.setValue(8)
+        self.spn_board_square = QDoubleSpinBox()
+        self.spn_board_square.setRange(5.0, 200.0)
+        self.spn_board_square.setDecimals(2)
+        self.spn_board_square.setValue(15.0)
+        self.spn_board_square.setSuffix(" mm")
+        self.spn_board_marker = QDoubleSpinBox()
+        self.spn_board_marker.setRange(3.0, 150.0)
+        self.spn_board_marker.setDecimals(2)
+        self.spn_board_marker.setValue(11.2)
+        self.spn_board_marker.setSuffix(" mm")
+        # calib.io "Start ID": the first marker id on the print. OpenCV builds
+        # boards from 0, so a mismatch here maps every marker to the WRONG
+        # cell and the board barely detects -- the single most damaging field.
+        self.spn_board_start = QSpinBox()
+        self.spn_board_start.setRange(0, 900)
+        self.spn_board_start.setValue(1)
+        self.cmb_dict = QComboBox()
+        self.cmb_dict.addItems(["DICT_4X4_50", "DICT_4X4_250", "DICT_5X5_100",
+                                "DICT_5X5_250", "DICT_6X6_250", "DICT_7X7_50",
+                                "DICT_APRILTAG_36h11"])
+        self.btn_board_apply = QPushButton(tr("보드 설정 적용"))
+        self.btn_board_apply.setStyleSheet("background:#37474f;color:#fff;padding:4px;")
+        bg.addWidget(QLabel("Columns"), 0, 0)
+        bg.addWidget(self.spn_board_cols, 0, 1)
+        bg.addWidget(QLabel("Rows"), 1, 0)
+        bg.addWidget(self.spn_board_rows, 1, 1)
+        bg.addWidget(QLabel("Checker width"), 2, 0)
+        bg.addWidget(self.spn_board_square, 2, 1)
+        bg.addWidget(QLabel(tr("Marker size (실측)")), 3, 0)
+        bg.addWidget(self.spn_board_marker, 3, 1)
+        bg.addWidget(QLabel("Start ID"), 4, 0)
+        bg.addWidget(self.spn_board_start, 4, 1)
+        bg.addWidget(QLabel("Dictionary"), 5, 0)
+        bg.addWidget(self.cmb_dict, 5, 1)
+        note = QLabel(tr("calib.io의 Board width/height는 종이 크기라 입력 불필요.\n"
+                         "Marker size는 인쇄물의 검은 마커 한 변을 자로 재서 입력."))
+        note.setStyleSheet("color:#90a4ae;font-size:11px;")
+        note.setWordWrap(True)
+        bg.addWidget(note, 6, 0, 1, 2)
+        bg.addWidget(self.btn_board_apply, 7, 0, 1, 2)
+        self.board_box.setVisible(False)      # ArUco mode is the default
+        lay.addWidget(self.board_box)
 
         # ---- progress ----
         prog = QGroupBox("Progress")
@@ -310,7 +633,7 @@ class HandeyeGuiWidget(QWidget):
         self.btn_reset = QPushButton("↺ Reset")
         self.btn_add = QPushButton("＋ Add sample")
         self.btn_stop = QPushButton("⛔ STOP")
-        self.btn_clear_stop = QPushButton("STOP 해제")
+        self.btn_clear_stop = QPushButton(tr("STOP 해제"))
         self.btn_start.setStyleSheet("background:#2e7d32;color:#fff;font-weight:bold;padding:8px;")
         self.btn_stop.setStyleSheet("background:#b71c1c;color:#fff;font-weight:bold;padding:8px;")
         self.btn_pause.setEnabled(False)
@@ -327,7 +650,7 @@ class HandeyeGuiWidget(QWidget):
         # ---- result ----
         res = QGroupBox("Result: gripper_T_camera")
         rl = QVBoxLayout(res)
-        self.lbl_result = QLabel("아직 결과 없음")
+        self.lbl_result = QLabel(tr("아직 결과 없음"))
         self.lbl_result.setStyleSheet("font-family:monospace;font-size:11px;")
         self.lbl_result.setTextInteractionFlags(Qt.TextSelectableByMouse)
         rl.addWidget(self.lbl_result)
@@ -370,11 +693,15 @@ class HandeyeGuiWidget(QWidget):
         self.sig_can.connect(self._on_can_result)
         self.cmb_target.currentIndexChanged.connect(self._set_target_type)
         self.btn_marker_apply.clicked.connect(self._apply_marker_settings)
-        # ID/size only describe the single-marker target; grey them out in board mode
+        self.btn_rviz.clicked.connect(self._start_rviz)
+        self.btn_board_apply.clicked.connect(self._apply_board_settings)
+        # ID/size describe the single-marker target; the board panel replaces
+        # them in ChArUco mode.
         self.cmb_target.currentIndexChanged.connect(
             lambda i: (self.spn_marker_id.setEnabled(i == 0),
                        self.spn_marker_len.setEnabled(i == 0),
-                       self.btn_marker_apply.setEnabled(i == 0)))
+                       self.btn_marker_apply.setEnabled(i == 0),
+                       self.board_box.setVisible(i == 1)))
 
     def _setup_ros(self):
         n = self._node
@@ -405,9 +732,14 @@ class HandeyeGuiWidget(QWidget):
             # The arm driver owns the CAN port name; ask it rather than guessing.
             "driver_params": n.create_client(
                 GetParameters, "/agx_arm_ctrl_single_node/get_parameters"),
-            # target-type / marker settings on the detector
+            # target-type / marker settings on the detector.
+            # ATOMIC on purpose: the plain set_parameters service feeds the
+            # node's callback ONE parameter at a time, so a batch like
+            # square+marker can be half-applied when the cross-check rejects
+            # an intermediate state. Atomically delivers the whole batch.
             "det_set": n.create_client(
-                SetParameters, "/aruco_detector_node/set_parameters"),
+                SetParametersAtomically,
+                "/aruco_detector_node/set_parameters_atomically"),
             "det_get": n.create_client(
                 GetParameters, "/aruco_detector_node/get_parameters"),
         }
@@ -431,6 +763,28 @@ class HandeyeGuiWidget(QWidget):
             self.lbl_message.setText(
                 f"{msg.message}  |  RMS t={msg.translation_rms*1000:.2f} mm  "
                 f"r={msg.rotation_rms_deg:.3f}°")
+        # Running estimate: show the result converging pose by pose instead of
+        # leaving the panel blank until the run finishes. The FINAL result
+        # (_on_result) overwrites this and is the one that gets saved.
+        if getattr(msg, "live_valid", False) and not self._have_final_result:
+            self._show_live_result(msg)
+
+    def _show_live_result(self, msg):
+        t = msg.live_gripper_to_camera.translation
+        q = msg.live_gripper_to_camera.rotation
+        r, p, y = self._quat_to_rpy(q.x, q.y, q.z, q.w)
+        self.lbl_result.setText(
+            tr("state   : LIVE (진행 중 · 자동 갱신)\n")
+            + f"samples : {msg.live_sample_count}\n"
+            + f"t (m)   : [{t.x:+.6f}, {t.y:+.6f}, {t.z:+.6f}]\n"
+            + f"q xyzw  : [{q.x:+.6f}, {q.y:+.6f}, {q.z:+.6f}, {q.w:+.6f}]\n"
+            + f"rpy (°) : [{math.degrees(r):+.3f}, {math.degrees(p):+.3f}, "
+            + f"{math.degrees(y):+.3f}]\n"
+            + f"RMS     : t {msg.live_translation_rms*1000:.3f} mm\n"
+            + f"          r {msg.live_rotation_rms_deg:.4f}°\n"
+            + tr("saved   : -  (아직 저장 전)"))
+        self.lbl_result.setStyleSheet(
+            "font-family:monospace;font-size:11px;color:#0277bd;")
 
     def _on_robot(self, msg):
         self._arm_connected = bool(msg.connected)
@@ -474,6 +828,10 @@ class HandeyeGuiWidget(QWidget):
         q = res.gripper_to_camera.rotation
         r, p, y = self._quat_to_rpy(q.x, q.y, q.z, q.w)
         self._last_saved_path = res.saved_path or self._last_saved_path
+        # From here the panel shows the FINAL result; stop the live updates
+        # from overwriting it.
+        self._have_final_result = True
+        self.lbl_result.setStyleSheet("font-family:monospace;font-size:11px;")
         self.lbl_result.setText(
             f"state   : {res.state}\n"
             f"samples : {res.sample_count}\n"
@@ -497,11 +855,13 @@ class HandeyeGuiWidget(QWidget):
 
     def _on_live(self, live):
         if live:
-            self.banner.setText("⚠  LIVE — dry_run=false : 로봇이 실제로 움직입니다. 비상정지 대기!")
+            self.banner.setText(
+                tr("⚠  LIVE — dry_run=false : 로봇이 실제로 움직입니다. 비상정지 대기!"))
             self.banner.setStyleSheet(
                 "background:#b71c1c;color:#fff;font-weight:bold;padding:6px;")
         else:
-            self.banner.setText("DRY-RUN — dry_run=true : 로봇은 움직이지 않습니다 (검증만)")
+            self.banner.setText(
+                tr("DRY-RUN — dry_run=true : 로봇은 움직이지 않습니다 (검증만)"))
             self.banner.setStyleSheet(
                 "background:#2e7d32;color:#fff;font-weight:bold;padding:6px;")
 
@@ -510,9 +870,11 @@ class HandeyeGuiWidget(QWidget):
     # ------------------------------------------------------------------ #
     def _start(self):
         if not self._run_client.wait_for_server(timeout_sec=2.0):
-            self._log("ERROR: run_calibration 액션 서버 없음 "
-                      "(handeye_calibration_node 실행 중인지 확인)")
+            self._log(tr("ERROR: run_calibration 액션 서버 없음 "
+                         "(handeye_calibration_node 실행 중인지 확인)"))
             return
+        # a new run starts tracking the live estimate again
+        self._have_final_result = False
         goal = RunCalibration.Goal()
         goal.target_sample_count = self.spn_samples.value()
         goal.auto_move = self.chk_auto.isChecked()
@@ -535,27 +897,27 @@ class HandeyeGuiWidget(QWidget):
         try:
             gh = future.result()
         except Exception as exc:  # noqa: BLE001
-            self.sig_log.emit(f"ERROR: goal 전송 실패: {exc}")
+            self.sig_log.emit(tr("ERROR: goal 전송 실패: {}").format(exc))
             self.sig_goal_done.emit()
             return
         if not gh.accepted:
-            self.sig_log.emit("goal이 거절되었습니다.")
+            self.sig_log.emit(tr("goal이 거절되었습니다."))
             self.sig_goal_done.emit()
             return
         self._goal_handle = gh
-        self.sig_log.emit("goal 수락됨. 캘리브레이션 진행 중...")
+        self.sig_log.emit(tr("goal 수락됨. 캘리브레이션 진행 중..."))
         gh.get_result_async().add_done_callback(self._on_goal_result)
 
     def _on_goal_result(self, future):
         try:
             res = future.result().result
         except Exception as exc:  # noqa: BLE001
-            self.sig_log.emit(f"ERROR: 결과 수신 실패: {exc}")
+            self.sig_log.emit(tr("ERROR: 결과 수신 실패: {}").format(exc))
             self.sig_goal_done.emit()
             return
-        self.sig_log.emit(f"완료: {res.state} — {res.message}")
+        self.sig_log.emit(tr("완료: {} — {}").format(res.state, res.message))
         if res.saved_path:
-            self.sig_log.emit(f"저장됨: {res.saved_path}")
+            self.sig_log.emit(tr("저장됨: {}").format(res.saved_path))
         self.sig_result.emit(res)
         self.sig_goal_done.emit()
 
@@ -567,14 +929,14 @@ class HandeyeGuiWidget(QWidget):
 
     def _cancel(self):
         if self._goal_handle is None:
-            self._log("취소할 goal이 없습니다.")
+            self._log(tr("취소할 goal이 없습니다."))
             return
-        self._log("취소 요청 전송")
+        self._log(tr("취소 요청 전송"))
         self._goal_handle.cancel_goal_async()
 
     def _toggle_pause(self):
         key = "resume" if self._paused else "pause"
-        self._call_trigger(key, "재개" if self._paused else "일시정지")
+        self._call_trigger(key, tr("재개") if self._paused else tr("일시정지"))
         self._paused = not self._paused
         self.btn_pause.setText("▶ Resume" if self._paused else "⏸ Pause")
 
@@ -582,7 +944,7 @@ class HandeyeGuiWidget(QWidget):
         self._call_trigger("stop", "STOP")
 
     def _clear_stop(self):
-        self._call_trigger("clear_stop", "STOP 해제")
+        self._call_trigger("clear_stop", tr("STOP 해제"))
 
     def _reset(self):
         self._call(self._srv["reset"], ResetCalibration.Request(), "reset_calibration")
@@ -598,7 +960,7 @@ class HandeyeGuiWidget(QWidget):
     def _load(self):
         start = os.path.expanduser("~/.ros/piper_auto_handeye")
         path, _ = QFileDialog.getOpenFileName(
-            self, "캘리브레이션 YAML 선택",
+            self, tr("캘리브레이션 YAML 선택"),
             start if os.path.isdir(start) else os.path.expanduser("~"),
             "YAML (*.yaml *.yml)")
         if not path:
@@ -626,18 +988,19 @@ class HandeyeGuiWidget(QWidget):
         try:
             if not client.service_is_ready():
                 if not client.wait_for_service(timeout_sec=1.0):
-                    self._log(f"ERROR: 서비스 '{label}' 사용 불가 (노드 미실행?)")
+                    self._log(
+                        tr("ERROR: 서비스 '{}' 사용 불가 (노드 미실행?)").format(label))
                     return
             fut = client.call_async(request)
         except Exception as exc:  # noqa: BLE001
-            self._log(f"ERROR: {label} 호출 실패: {exc}")
+            self._log(tr("ERROR: {} 호출 실패: {}").format(label, exc))
             return
 
         def done(f, label=label):
             try:
                 resp = f.result()
             except Exception as exc:  # noqa: BLE001
-                self.sig_log.emit(f"ERROR: {label} 실패: {exc}")
+                self.sig_log.emit(tr("ERROR: {} 실패: {}").format(label, exc))
                 return
             msg = getattr(resp, "message", "")
             ok = getattr(resp, "success", True)
@@ -728,33 +1091,37 @@ class HandeyeGuiWidget(QWidget):
     def _refresh_can(self):
         if self._closing:
             return
-        if not self._can_port or self._can_port == "can_follower":
+        if not self._can_port or self._can_port == "can0":
             self._query_can_port()      # keep trying until the driver answers
 
         state, bitrate = self._can_link_state()
         up = (state == "UP")
         rate_ok = (bitrate == "1000000")
         if up and rate_ok:
-            self.lbl_can_link.setText(f"링크: ● {self._can_port} UP (1 Mbit/s)")
+            self.lbl_can_link.setText(
+                tr("링크: ● {} UP (1 Mbit/s)").format(self._can_port))
             self.lbl_can_link.setStyleSheet("font-family:monospace;color:#2e7d32;")
         elif up:
-            self.lbl_can_link.setText(f"링크: ▲ {self._can_port} UP, bitrate={bitrate} (1000000 이어야 함)")
+            self.lbl_can_link.setText(
+                tr("링크: ▲ {} UP, bitrate={} (1000000 이어야 함)")
+                .format(self._can_port, bitrate))
             self.lbl_can_link.setStyleSheet("font-family:monospace;color:#ef6c00;")
         else:
-            self.lbl_can_link.setText(f"링크: ○ {self._can_port} {state}")
+            self.lbl_can_link.setText(
+                tr("링크: ○ {} {}").format(self._can_port, state))
             self.lbl_can_link.setStyleSheet("font-family:monospace;color:#b71c1c;")
 
         # The link being up says nothing about the arm being powered on, so
         # report the driver's view separately.
         if self._arm_connected:
-            self.lbl_can_arm.setText("팔: ● 피드백 수신 중")
+            self.lbl_can_arm.setText(tr("팔: ● 피드백 수신 중"))
             self.lbl_can_arm.setStyleSheet("font-family:monospace;color:#2e7d32;")
         else:
-            self.lbl_can_arm.setText("팔: ○ 피드백 없음 (전원/케이블 확인)")
+            self.lbl_can_arm.setText(tr("팔: ○ 피드백 없음 (전원/케이블 확인)"))
             self.lbl_can_arm.setStyleSheet("font-family:monospace;color:#b71c1c;")
 
         self.btn_can.setEnabled(not self._can_busy and not (up and rate_ok))
-        self.btn_can.setText("CAN 연결됨" if (up and rate_ok) else "CAN 연결")
+        self.btn_can.setText(tr("CAN 연결됨") if (up and rate_ok) else tr("CAN 연결"))
 
     def _can_connect(self):
         """Bring the socketcan link up.
@@ -772,18 +1139,20 @@ class HandeyeGuiWidget(QWidget):
             return
         script = self._can_setup_script()
         if script is None:
-            self._log("ERROR: can_setup.sh를 찾을 수 없습니다. "
-                      "piper_auto_handeye 패키지가 빌드되었는지 확인하세요.")
+            self._log(tr("ERROR: can_setup.sh를 찾을 수 없습니다. "
+                         "piper_auto_handeye 패키지가 빌드되었는지 확인하세요."))
             return
         if shutil.which("pkexec") is None:
-            self._log("pkexec가 없어 GUI에서 권한 상승을 할 수 없습니다. 터미널에서 실행하세요:")
+            self._log(
+                tr("pkexec가 없어 GUI에서 권한 상승을 할 수 없습니다. 터미널에서 실행하세요:"))
             self._log(f"  bash {script} {self._can_port}")
             return
 
         self._can_busy = True
         self.btn_can.setEnabled(False)
-        self.btn_can.setText("연결 중...")
-        self._log(f"CAN 연결 시도: {script} {self._can_port} (관리자 권한 요청)")
+        self.btn_can.setText(tr("연결 중..."))
+        self._log(tr("CAN 연결 시도: {} {} (관리자 권한 요청)")
+                  .format(script, self._can_port))
 
         def work():
             try:
@@ -816,9 +1185,9 @@ class HandeyeGuiWidget(QWidget):
         length_m = float(self.spn_marker_len.value()) / 1000.0
         cli = self._srv["det_set"]
         if not cli.service_is_ready():
-            self._log("FAIL: 검출기 파라미터 서비스에 연결할 수 없음 (마커 설정)")
+            self._log(tr("FAIL: 검출기 파라미터 서비스에 연결할 수 없음 (마커 설정)"))
             return
-        req = SetParameters.Request()
+        req = SetParametersAtomically.Request()
         req.parameters = [
             Parameter("target_marker_id", Parameter.Type.INTEGER,
                       mid).to_parameter_msg(),
@@ -829,16 +1198,81 @@ class HandeyeGuiWidget(QWidget):
 
         def done(f):
             try:
-                results = f.result().results
+                res = f.result().result
             except Exception as exc:  # noqa: BLE001
-                self.sig_log.emit(f"FAIL: 마커 설정 적용 실패: {exc}")
+                self.sig_log.emit(tr("FAIL: 마커 설정 적용 실패: {}").format(exc))
                 return
-            bad = [r.reason for r in results if not r.successful]
+            bad = [] if res.successful else [res.reason]
             if bad:
-                self.sig_log.emit(f"FAIL: 마커 설정 거부됨: {'; '.join(bad)}")
+                self.sig_log.emit(
+                    tr("FAIL: 마커 설정 거부됨: {}").format("; ".join(bad)))
             else:
                 self.sig_log.emit(
-                    f"OK: 마커 설정 적용 -> ID {mid}, {length_m * 1000:.1f} mm")
+                    tr("OK: 마커 설정 적용 -> ID {}, {} mm")
+                    .format(mid, f"{length_m * 1000:.1f}"))
+
+        fut.add_done_callback(done)
+
+    def _apply_board_settings(self):
+        """Push the ChArUco board geometry (calib.io fields) to the detector."""
+        cli = self._srv["det_set"]
+        if not cli.service_is_ready():
+            self._log(tr("FAIL: 검출기 파라미터 서비스에 연결할 수 없음 (보드 설정)"))
+            return
+        sq_mm = float(self.spn_board_square.value())
+        mk_mm = float(self.spn_board_marker.value())
+        if mk_mm >= sq_mm:
+            self._log(tr("FAIL: 마커 크기는 체커 한 칸보다 작아야 합니다"))
+            return
+        req = SetParametersAtomically.Request()
+        req.parameters = [
+            Parameter("charuco_squares_x", Parameter.Type.INTEGER,
+                      int(self.spn_board_cols.value())).to_parameter_msg(),
+            Parameter("charuco_squares_y", Parameter.Type.INTEGER,
+                      int(self.spn_board_rows.value())).to_parameter_msg(),
+            Parameter("charuco_square_length", Parameter.Type.DOUBLE,
+                      sq_mm / 1000.0).to_parameter_msg(),
+            Parameter("charuco_marker_length", Parameter.Type.DOUBLE,
+                      mk_mm / 1000.0).to_parameter_msg(),
+            Parameter("charuco_start_id", Parameter.Type.INTEGER,
+                      int(self.spn_board_start.value())).to_parameter_msg(),
+            Parameter("aruco_dictionary", Parameter.Type.STRING,
+                      self.cmb_dict.currentText()).to_parameter_msg(),
+        ]
+        # ids on the print run start..start+n-1; refuse a dictionary too small
+        n_markers = (int(self.spn_board_cols.value())
+                     * int(self.spn_board_rows.value())) // 2
+        max_id = int(self.spn_board_start.value()) + n_markers - 1
+        dict_cap = {"DICT_4X4_50": 50, "DICT_4X4_250": 250, "DICT_5X5_100": 100,
+                    "DICT_5X5_250": 250, "DICT_6X6_250": 250, "DICT_7X7_50": 50,
+                    "DICT_APRILTAG_36h11": 587}.get(self.cmb_dict.currentText(), 50)
+        if max_id >= dict_cap:
+            self._log(
+                tr("FAIL: Start ID {} + 마커 {}개 = 최대 ID {} 가 {} 용량({})을 넘습니다")
+                .format(self.spn_board_start.value(), n_markers, max_id,
+                        self.cmb_dict.currentText(), dict_cap))
+            return
+        fut = cli.call_async(req)
+
+        def done(f):
+            try:
+                res = f.result().result
+            except Exception as exc:  # noqa: BLE001
+                self.sig_log.emit(tr("FAIL: 보드 설정 적용 실패: {}").format(exc))
+                return
+            bad = [] if res.successful else [res.reason]
+            if bad:
+                self.sig_log.emit(
+                    tr("FAIL: 보드 설정 거부됨: {}").format("; ".join(bad)))
+            else:
+                self.sig_log.emit(
+                    tr("OK: ChArUco 보드 -> {}x{}, 체커 {}mm, 마커 {}mm, "
+                       "Start ID {}, {}")
+                    .format(self.spn_board_cols.value(),
+                            self.spn_board_rows.value(),
+                            f"{sq_mm:.1f}", f"{mk_mm:.1f}",
+                            self.spn_board_start.value(),
+                            self.cmb_dict.currentText()))
 
         fut.add_done_callback(done)
 
@@ -873,23 +1307,25 @@ class HandeyeGuiWidget(QWidget):
         value = "charuco" if index == 1 else "aruco"
         cli = self._srv["det_set"]
         if not cli.service_is_ready():
-            self._log(f"FAIL: 검출기 파라미터 서비스에 연결할 수 없음 (target={value})")
+            self._log(
+                tr("FAIL: 검출기 파라미터 서비스에 연결할 수 없음 (target={})")
+                .format(value))
             return
-        req = SetParameters.Request()
+        req = SetParametersAtomically.Request()
         req.parameters = [Parameter("target_type", Parameter.Type.STRING,
                                     value).to_parameter_msg()]
         fut = cli.call_async(req)
 
         def done(f):
             try:
-                r = f.result().results[0]
+                r = f.result().result
             except Exception as exc:  # noqa: BLE001
-                self.sig_log.emit(f"FAIL: target_type 변경 실패: {exc}")
+                self.sig_log.emit(tr("FAIL: target_type 변경 실패: {}").format(exc))
                 return
             if r.successful:
-                self.sig_log.emit(f"OK: 캘리브레이션 타겟 -> {value}")
+                self.sig_log.emit(tr("OK: 캘리브레이션 타겟 -> {}").format(value))
             else:
-                self.sig_log.emit(f"FAIL: target_type 거부됨: {r.reason}")
+                self.sig_log.emit(tr("FAIL: target_type 거부됨: {}").format(r.reason))
 
         fut.add_done_callback(done)
 
@@ -898,8 +1334,8 @@ class HandeyeGuiWidget(QWidget):
         for line in (message or "").splitlines():
             if line.strip():
                 self._log(("  " if ok else "  ! ") + line)
-        self._log("OK: CAN 링크 활성화" if ok
-                  else "FAIL: CAN 링크 활성화 실패 (위 로그 확인)")
+        self._log(tr("OK: CAN 링크 활성화") if ok
+                  else tr("FAIL: CAN 링크 활성화 실패 (위 로그 확인)"))
         self._refresh_can()
 
     # ------------------------------------------------------------------ #
@@ -978,6 +1414,7 @@ class HandeyeGuiWidget(QWidget):
     def shutdown(self):
         self._live_timer.stop()
         self._can_timer.stop()
+        self._stop_rviz()
         for sub in self._subs:
             self._node.destroy_subscription(sub)
         self._subs = []
