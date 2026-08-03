@@ -2,15 +2,15 @@
 # Bring up the Piper CAN interface(s) for the hand-eye calibration stack.
 #
 #   ./can_setup.sh                  # bring up every gs_usb CAN iface at 1 Mbit/s
-#   ./can_setup.sh can0             # bring up just this one
-#   ./can_setup.sh can0 1000000
+#   ./can_setup.sh can_follower     # bring up just this one
+#   ./can_setup.sh can_follower 1000000
 #
 # Idempotent: an interface that is already UP at the right bitrate is left
 # alone (bouncing it would drop the SDK's rx thread on a running node).
 #
 # This only prepares the socketcan link. To check that the ARM actually
 # answers on it, run the SDK-level probe:
-#   ros2 run piper_auto_handeye agx_arm_check --can-port can0
+#   ros2 run piper_auto_handeye agx_arm_check --can-port can_follower
 set -uo pipefail
 
 BITRATE="${2:-1000000}"

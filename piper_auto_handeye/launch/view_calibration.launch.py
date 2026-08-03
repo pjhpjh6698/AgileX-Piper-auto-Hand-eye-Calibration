@@ -17,7 +17,7 @@ floating off the gripper or pointing the wrong way.
   ros2 launch piper_auto_handeye view_calibration.launch.py
   ros2 launch piper_auto_handeye view_calibration.launch.py use_camera:=false
   ros2 launch piper_auto_handeye view_calibration.launch.py \
-      calibration_file:=~/.ros/piper_auto_handeye/handeye_park_...yaml
+      calibration_file:=/home/pjh/.ros/piper_auto_handeye/handeye_park_...yaml
 
 This launch NEVER commands motion: no calibration manager runs, and the control
 node comes up in dry_run.
@@ -118,8 +118,8 @@ def generate_launch_description():
                               description="also start the wrist camera + detector"),
         DeclareLaunchArgument("use_driver", default_value="true",
                               description="start the arm driver so the model moves"),
-        DeclareLaunchArgument("can_port", default_value="can0"),
-        DeclareLaunchArgument("wrist_camera_serial", default_value=""),
+        DeclareLaunchArgument("can_port", default_value="can_follower"),
+        DeclareLaunchArgument("wrist_camera_serial", default_value="_338522300590"),
         DeclareLaunchArgument(
             "calibration_file", default_value="",
             description="result yaml to display; empty = newest in the output dir"),

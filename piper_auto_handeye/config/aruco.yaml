@@ -1,11 +1,10 @@
 # ArUco target detector parameters.
 # Loaded by aruco_detector_node. All lengths in meters.
 #
-# The topics below are namespaced to the wrist (eye-in-hand) camera:
-# real_calibration.launch.py starts it with camera_namespace:=wrist
-# camera_name:=camera. The namespace is fixed even on a single-camera rig, so
-# that adding a second camera later needs no config change here -- pin the
-# wrist one with wrist_camera_serial:= and nothing depends on USB order.
+# TWO RealSense cameras are attached to this machine, so the topics below are
+# namespaced to the WRIST one (the eye-in-hand camera). real_calibration.launch.py
+# starts it with camera_namespace:=wrist camera_name:=camera and pins it by
+# serial number, so nothing depends on USB enumeration order.
 /**:
   ros__parameters:
     image_topic: /wrist/camera/color/image_raw

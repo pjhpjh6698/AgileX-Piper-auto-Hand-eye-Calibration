@@ -88,8 +88,12 @@ ros2 run piper_auto_handeye agx_arm_check             # read-only probe
 when the link is up, frames are arriving, and the arm decodes a live pose with
 no faults. Do not go past a `NOT READY`.
 
-Find your interface with `ip -br link show type can` and pass it as
-`--can-port` / `can_port:=` if it is not `can0`.
+The defaults in the launch file are set for the rig this was developed on, so
+pass your own. Find your interface with `ip -br link show type can`:
+
+```bash
+ros2 launch piper_auto_handeye real_calibration.launch.py can_port:=can0
+```
 
 ### 3. Calibrate
 
@@ -133,8 +137,8 @@ alongside a `_samples.yaml` with every raw sample and why it was accepted.
 |---|---|---|
 | `dry_run` | `false` | `true` validates the poses without moving the arm |
 | `gui_lang` | `ko` | GUI language; `en` for English |
-| `can_port` | `can0` | socketcan interface the arm is on |
-| `wrist_camera_serial` | (empty) | empty uses the only camera attached |
+| `can_port` | | socketcan interface the arm is on; set it to yours |
+| `wrist_camera_serial` | | serial of the wrist camera; needed only with more than one camera |
 | `calibration_method` | `TSAI` | `TSAI`, `PARK`, `HORAUD`, `ANDREFF`, `DANIILIDIS` |
 | `use_gui` | `true` | start the rqt GUI |
 | `use_realsense` | `true` | start the camera |
@@ -143,9 +147,16 @@ alongside a `_samples.yaml` with every raw sample and why it was accepted.
 `ros2 launch piper_auto_handeye real_calibration.launch.py --show-args` lists
 them all.
 
-With more than one RealSense attached, pin the wrist one by serial. Keep the
-leading underscore — realsense2_camera reads a bare numeric serial as an integer
-and fails to match:
+With a single camera attached, pass an empty serial and the launch takes
+whichever camera it finds:
+
+```bash
+ros2 launch piper_auto_handeye real_calibration.launch.py wrist_camera_serial:=''
+```
+
+With more than one, pin the wrist camera by serial. Keep the leading underscore
+— realsense2_camera reads a bare numeric serial as an integer and fails to
+match:
 
 ```bash
 ros2 launch piper_auto_handeye real_calibration.launch.py \

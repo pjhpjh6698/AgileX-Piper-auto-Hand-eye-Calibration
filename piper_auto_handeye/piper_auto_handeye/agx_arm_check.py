@@ -6,7 +6,7 @@ something looks wrong. It is read-only -- it never enables the arm and never
 commands motion.
 
     ros2 run piper_auto_handeye agx_arm_check
-    ros2 run piper_auto_handeye agx_arm_check --can-port can0
+    ros2 run piper_auto_handeye agx_arm_check --can-port can_master
     ros2 run piper_auto_handeye agx_arm_check --watch
 
 Exit status is 0 only when the arm answers and reports no fault, so it can gate
@@ -226,8 +226,8 @@ def watch(port, hz=5.0):
 def main(argv=None):
     ap = argparse.ArgumentParser(
         description="Read-only CAN/SDK connectivity check for the AgileX arm.")
-    ap.add_argument("--can-port", default="can0",
-                    help="socketcan interface name (default: can0)")
+    ap.add_argument("--can-port", default="can_follower",
+                    help="socketcan interface name (default: can_follower)")
     ap.add_argument("--watch", action="store_true",
                     help="stream the live pose instead of running the checks")
     ap.add_argument("--timeout", type=float, default=5.0,

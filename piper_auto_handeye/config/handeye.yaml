@@ -58,7 +58,7 @@
     marker_recovery_joint_step_deg: 8.0    # wrist-joint nudge per recovery step
 
     # ---- Down-looking home ------------------------------------------------
-    # TAUGHT configuration: a leader arm was posed by hand at
+    # TAUGHT configuration: the leader arm on can_master was posed by hand at
     # the desired viewing angle and its joints read back (2026-07-27). Flange
     # lands at (0.203, -0.006, 0.323), tilted 22 deg from vertical. Only j5 was
     # pulled from 68.8 to 66.0 deg -- the demonstrated value sat 1.2 deg from

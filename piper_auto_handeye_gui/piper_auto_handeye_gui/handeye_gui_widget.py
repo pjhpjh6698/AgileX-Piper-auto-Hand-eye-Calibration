@@ -149,7 +149,7 @@ class HandeyeGuiWidget(QWidget):
         self._paused = False
         self._last_saved_path = ""
         self._closing = False
-        self._can_port = "can0"              # refreshed from the driver's parameter
+        self._can_port = "can_follower"      # refreshed from the driver's parameter
         self._arm_connected = False          # last RobotState.connected
         self._can_busy = False               # a bring-up is in flight
         # while False the Result panel tracks the live estimate; the final
@@ -1091,7 +1091,7 @@ class HandeyeGuiWidget(QWidget):
     def _refresh_can(self):
         if self._closing:
             return
-        if not self._can_port or self._can_port == "can0":
+        if not self._can_port or self._can_port == "can_follower":
             self._query_can_port()      # keep trying until the driver answers
 
         state, bitrate = self._can_link_state()

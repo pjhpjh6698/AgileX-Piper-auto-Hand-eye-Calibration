@@ -13,8 +13,8 @@ The AgileX driver (agx_arm_ctrl) and its SDK (pyAgxArm) are both vendored in
 this workspace, so nothing outside `colcon build` is required. Bring the CAN
 link up and prove the arm answers BEFORE launching:
 
-  bash piper_auto_handeye/scripts/can_setup.sh can0
-  ros2 run piper_auto_handeye agx_arm_check --can-port can0
+  bash piper_auto_handeye/scripts/can_setup.sh can_follower
+  ros2 run piper_auto_handeye agx_arm_check --can-port can_follower
 
 The driver is launched with auto_enable:=false on purpose: nothing powers the
 joints until piper_control_node asks for it, immediately before a live move.
@@ -103,15 +103,14 @@ def generate_launch_description():
         parameters=[{"robot_description": ParameterValue(
             Command(["xacro ", urdf]), value_type=str)}])
 
-    # --- RealSense (the wrist camera) ---
-    # An empty serial takes whichever camera is attached, which is what a
-    # single-camera rig wants. With more than one camera, pin the eye-in-hand
-    # one by serial: USB enumeration order is not stable across reboots and
-    # grabbing the wrong camera would silently calibrate against the wrong rigid
-    # body. realsense2_camera needs the serial with a leading underscore --
-    # without it the value is parsed as an integer and the match fails.
-    # Depth is off: ArUco needs colour only, and two D455s on one USB controller
-    # can saturate the bandwidth otherwise.
+    # --- RealSense (the WRIST camera) ---
+    # Two RealSense cameras are attached, so pin the eye-in-hand one by serial
+    # number: USB enumeration order is not stable across reboots and grabbing
+    # the wrong camera would silently calibrate against the wrong rigid body.
+    # realsense2_camera needs the serial with a leading underscore -- without it
+    # the value is parsed as an integer and the match fails.
+    # Depth is off: ArUco needs colour only, and two D455s on one controller can
+    # saturate USB bandwidth otherwise.
     realsense = GroupAction(
         condition=IfCondition(use_realsense),
         actions=[IncludeLaunchDescription(
@@ -179,15 +178,11 @@ def generate_launch_description():
         DeclareLaunchArgument("control_backend", default_value="agx",
                               description="agx = via the AgileX driver (real robot) | "
                                           "topic = /pos_cmd interface (simulation only)"),
-        DeclareLaunchArgument("can_port", default_value="can0",
-                              description="socketcan interface the arm is on "
-                                          "(see `ip -br link show type can`)"),
-        DeclareLaunchArgument("wrist_camera_serial", default_value="",
-                              description="serial of the wrist camera; empty = use the "
-                                          "only camera attached. With more than one "
-                                          "camera, pin it: keep the leading underscore "
-                                          "(_123456789012) and list serials with "
-                                          "rs-enumerate-devices -s"),
+        DeclareLaunchArgument("can_port", default_value="can_follower",
+                              description="socketcan interface the arm is on"),
+        DeclareLaunchArgument("wrist_camera_serial", default_value="_338522300590",
+                              description="serial of the WRIST D455 (keep the leading "
+                                          "underscore; list with rs-enumerate-devices)"),
         DeclareLaunchArgument("calibration_method", default_value="TSAI",
                               description="TSAI (Tsai-Lenz) | PARK | HORAUD | ANDREFF | DANIILIDIS"),
         LogInfo(msg=["[SAFETY] dry_run=", dry_run,

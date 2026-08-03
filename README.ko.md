@@ -85,8 +85,12 @@ ros2 run piper_auto_handeye agx_arm_check             # 읽기 전용 점검
 있고, 프레임이 들어오며, 팔이 결함 없이 자세를 디코딩할 때만 0으로 종료합니다.
 `NOT READY`가 나오면 그대로 진행하지 마세요.
 
-인터페이스 이름은 `ip -br link show type can`으로 확인하고, `can0`이 아니면
-`--can-port` / `can_port:=`로 지정합니다.
+launch 파일의 기본값은 이 프로젝트를 개발한 장비 기준이므로, 사용 환경의 값을
+직접 넘기세요. 인터페이스 이름은 `ip -br link show type can`으로 확인합니다.
+
+```bash
+ros2 launch piper_auto_handeye real_calibration.launch.py can_port:=can0
+```
 
 ### 3. 캘리브레이션한다
 
@@ -129,8 +133,8 @@ ros2 run tf2_ros tf2_echo link6 camera_color_optical_frame
 |---|---|---|
 | `dry_run` | `false` | `true`면 로봇을 움직이지 않고 자세만 검증 |
 | `gui_lang` | `ko` | GUI 언어. 영어는 `en` |
-| `can_port` | `can0` | 팔이 물린 socketcan 인터페이스 |
-| `wrist_camera_serial` | (빈 값) | 비우면 연결된 유일한 카메라를 사용 |
+| `can_port` | | 팔이 물린 socketcan 인터페이스. 사용 환경에 맞게 지정 |
+| `wrist_camera_serial` | | 손목 카메라 시리얼. 카메라가 2대 이상일 때만 필요 |
 | `calibration_method` | `TSAI` | `TSAI`, `PARK`, `HORAUD`, `ANDREFF`, `DANIILIDIS` |
 | `use_gui` | `true` | rqt GUI 실행 |
 | `use_realsense` | `true` | 카메라 실행 |
@@ -139,9 +143,15 @@ ros2 run tf2_ros tf2_echo link6 camera_color_optical_frame
 전체 목록은 `ros2 launch piper_auto_handeye real_calibration.launch.py --show-args`
 로 볼 수 있습니다.
 
-RealSense가 2대 이상이면 손목 카메라를 시리얼로 고정하세요. 앞의 밑줄을 반드시
-유지해야 합니다. realsense2_camera가 숫자만 있는 시리얼을 정수로 해석해 매칭에
-실패하기 때문입니다.
+카메라가 1대라면 시리얼을 비워서 넘기면 연결된 카메라를 그대로 사용합니다.
+
+```bash
+ros2 launch piper_auto_handeye real_calibration.launch.py wrist_camera_serial:=''
+```
+
+2대 이상이면 손목 카메라를 시리얼로 고정하세요. 앞의 밑줄을 반드시 유지해야
+합니다. realsense2_camera가 숫자만 있는 시리얼을 정수로 해석해 매칭에 실패하기
+때문입니다.
 
 ```bash
 ros2 launch piper_auto_handeye real_calibration.launch.py \

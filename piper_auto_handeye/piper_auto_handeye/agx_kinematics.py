@@ -116,7 +116,7 @@ def within_joint_limits(joint_angles: Sequence[float], margin_deg: float = 0.0) 
                for q, (lo, hi) in zip(joint_angles, JOINT_LIMITS))
 
 
-def read_joint_angles(can_port: str = "can0",
+def read_joint_angles(can_port: str = "can_follower",
                       timeout: float = 5.0) -> Optional[np.ndarray]:
     """Current joint angles [rad] straight from the arm. Read-only.
 
