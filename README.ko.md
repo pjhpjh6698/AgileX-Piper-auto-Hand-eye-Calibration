@@ -7,6 +7,8 @@
 
 English documentation: [README.md](README.md)
 
+![캘리브레이션 GUI: 카메라 뷰, 내장 RViz, 실시간 결과](assets/images/GUI1.png)
+
 ## 특징
 
 - launch 파일 하나로 팔, 카메라, 검출기, 솔버, GUI, RViz가 모두 뜹니다.
@@ -276,7 +278,3 @@ hand-eye 문제로 검증합니다.
 R. Tsai and R. Lenz, "A new technique for fully autonomous and efficient 3D
 robotics hand/eye calibration", IEEE Transactions on Robotics and Automation,
 1989.
-
-GUI와 작업 흐름은
-[easy_handeye2](https://github.com/marcoesposito1988/easy_handeye2)의 구성을
-참고했습니다.

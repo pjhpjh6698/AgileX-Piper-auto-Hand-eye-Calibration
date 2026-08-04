@@ -7,6 +7,8 @@ gripper. No jogging the robot by hand, no writing down poses.
 
 한국어 문서는 [README.ko.md](README.ko.md)를 보세요.
 
+![The calibration GUI: camera view, embedded RViz and live result](assets/images/GUI1.png)
+
 ## Features
 
 - One launch file brings up the arm, camera, detector, solver, GUI and RViz.
@@ -284,6 +286,3 @@ model entirely in red.
 R. Tsai and R. Lenz, "A new technique for fully autonomous and efficient 3D
 robotics hand/eye calibration", IEEE Transactions on Robotics and Automation,
 1989.
-
-The GUI and workflow follow the shape of
-[easy_handeye2](https://github.com/marcoesposito1988/easy_handeye2).
