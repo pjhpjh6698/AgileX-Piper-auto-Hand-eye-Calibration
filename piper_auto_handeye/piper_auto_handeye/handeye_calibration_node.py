@@ -104,6 +104,9 @@ class HandeyeCalibrationNode(Node):
         self.max_r_rms = float(p("maximum_rotation_rms_deg", 1.0).value)
         self.enable_outlier = bool(p("enable_outlier_removal", True).value)
         self.max_removals = int(p("max_outlier_removals", 3).value)
+        # Floor on the budget as a fraction of the sample count, so the cap
+        # tracks target_samples instead of being tuned for one run length.
+        self.outlier_fraction = float(p("outlier_removal_fraction", 0.2).value)
         out_dir = p("output_directory", "").value
         self.output_dir = out_dir if out_dir else cio.default_output_dir()
         # Path to calibration_poses.yaml (loaded directly; robust vs ROS param
@@ -152,12 +155,19 @@ class HandeyeCalibrationNode(Node):
         # ㄹ sweep geometry -- see _generate_pose_set
         self.serp_rows = int(p("serp_rows", 3).value)
         self.serp_cols = int(p("serp_cols", 4).value)
-        self.serp_col_step = float(p("serp_col_step", 0.035).value)   # m along x
-        self.serp_row_step = float(p("serp_row_step", 0.03).value)    # m along -y
-        self.serp_twist_deg = float(p("serp_twist_deg", 25.0).value)
-        # Extra poses per stop that differ ONLY by joint-6 roll [deg].
-        self.serp_j6_extra_deg = list(p("serp_j6_extra_deg", [15.0, -15.0]).value)
-        self.serp_orients = int(p("serp_orientations_per_stop", 2).value)
+        self.serp_col_step = float(p("serp_col_step", 0.06).value)    # m along x
+        self.serp_row_step = float(p("serp_row_step", 0.05).value)    # m along -y
+        # Standoff offsets cycled across stops: viewing the marker from a
+        # different distance is what actually swings joints 2/3/5, which sliding
+        # sideways at a fixed radius barely does.
+        self.serp_dist_offsets = list(p("serp_dist_offsets",
+                                        [0.0, -0.06, 0.06]).value)
+        # Joint-6 rolls taken at each stop. These share joints 1-5 exactly, so
+        # they are cheap rotation diversity but NOT viewpoint diversity -- and
+        # every one of them fails together when a viewpoint is bad. Capped.
+        self.serp_roll_deg = list(p("serp_roll_deg",
+                                    [0.0, -25.0, 25.0, -12.0, 12.0]).value)
+        self.serp_max_rolls = int(p("serp_max_rolls_per_stop", 5).value)
         # distance from the home flange, along its viewing axis, to the point
         # every stop aims at (~= camera-to-marker distance at home)
         self.aim_distance = float(p("aim_distance", 0.25).value)
@@ -358,6 +368,15 @@ class HandeyeCalibrationNode(Node):
         saved_path = ""
         if g.save_on_success and final_state in (SUCCESS, WARNING):
             saved_path = self._save_result(solve_result, val, method, g.output_path)
+        elif final_state == FAILED:
+            # A failed run is the one you most need to look at, and it used to be
+            # the only one that left nothing behind -- so the numbers that
+            # explain the failure died with the process. Write the samples (not
+            # the result: it is not a calibration anyone should load).
+            try:
+                self._save_samples_only(method)
+            except Exception as exc:      # noqa: BLE001 - never mask the failure
+                self.get_logger().warn(f"could not save failed-run samples: {exc}")
 
         result.gripper_to_camera = tu.matrix_to_transform_msg(solve_result.gripper_T_camera)
         result.sample_count = solve_result.sample_count
@@ -427,11 +446,16 @@ class HandeyeCalibrationNode(Node):
 
         rows, cols = self.serp_rows, self.serp_cols
         col_off = [(c - (cols - 1) / 2.0) * self.serp_col_step for c in range(cols)]
-        j6_extra = [v for v in self.serp_j6_extra_deg if abs(v) > 1e-6]
-        twists = ([0.0] if self.serp_orients <= 1 else
-                  [-self.serp_twist_deg, +self.serp_twist_deg]
-                  if self.serp_orients == 2 else
-                  [-self.serp_twist_deg, 0.0, +self.serp_twist_deg])
+        dists = list(self.serp_dist_offsets) or [0.0]
+        # Rolls are applied straight to joint 6, so every roll at a stop shares
+        # joints 1-5 by construction. The cap is the point: shots that share an
+        # arm configuration also share its viewpoint, so a marker seen badly
+        # there produces that many correlated outliers at once -- and the
+        # solver only gets to discard max_outlier_removals of them before the
+        # whole run is failed on samples that were never independent.
+        rolls = list(self.serp_roll_deg)[:max(1, self.serp_max_rolls)]
+        if 0.0 not in rolls:
+            rolls = [0.0] + rolls[:max(0, self.serp_max_rolls - 1)]
 
         cone_cos = math.cos(math.radians(self.gen_down_cone))
 
@@ -460,13 +484,13 @@ class HandeyeCalibrationNode(Node):
                      np.array([0.0, 0.25, -0.35, 0.0, -0.20, 0.0]),
                      np.array([0.0, -0.20, 0.25, 0.0, 0.15, 0.0])]
 
-        def solve_stop(pos, Rz_twist, q_prev):
+        def solve_stop(pos, q_prev):
             for drop in (0.0, 0.03, 0.06):
                 p_d = pos - np.array([0.0, 0.0, drop])
                 R_aim = aim_rotation(p_d)
                 if R_aim is None:
                     continue
-                T_t = tu.make_transform(R_aim @ Rz_twist, p_d)
+                T_t = tu.make_transform(R_aim, p_d)
                 for base_seed in (q_prev, home):
                     for d in elbow_alt:
                         q = ak.ik(T_t, np.asarray(base_seed) + d)
@@ -474,33 +498,40 @@ class HandeyeCalibrationNode(Node):
                             return q
             return None
 
-        poses, dropped = [], 0
+        stop_qs, dropped = [], 0
         q_seed = home
         for r_i in range(rows):
             y_off = -r_i * self.serp_row_step        # rows advance along base -y
-            for x_off in col_off:                    # same left->right every row
-                pos = p0 + np.array([x_off, y_off, 0.0])
-                for tw in twists:
-                    c, s = math.cos(math.radians(tw)), math.sin(math.radians(tw))
-                    Rz = np.array([[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]])
-                    q = solve_stop(pos, Rz, q_seed)
-                    if q is None:
-                        dropped += 1
-                        continue
-                    q_seed = q                       # chain: next IK starts nearby
-                    poses.append(("joints", [float(v) for v in q]))
-                    # Extra wrist-roll variants, applied straight to joint 6.
-                    # Rolling the last joint spins the camera about its own
-                    # axis: pure rotation, zero translation, marker stays in
-                    # frame -- the cheapest orientation diversity there is, and
-                    # exactly what conditions the hand-eye rotation estimate.
-                    for extra in j6_extra:
-                        q6 = np.array(q, dtype=float)
-                        q6[5] += math.radians(extra)
-                        if ak.within_joint_limits(q6, margin_deg=3.0):
-                            poses.append(("joints", [float(v) for v in q6]))
-                        else:
-                            dropped += 1
+            for c_i, x_off in enumerate(col_off):    # same left->right every row
+                # Cycle the standoff so CONSECUTIVE stops differ in reach, not
+                # only in sideways position. Sliding across a fixed sphere moves
+                # joints 1 and 4 and leaves 2/3/5 almost still; changing how far
+                # the arm must reach is what exercises them.
+                d_off = dists[(r_i * cols + c_i) % len(dists)]
+                pos = p0 + np.array([x_off, y_off, 0.0]) + R0[:, 2] * d_off
+                q = solve_stop(pos, q_seed)
+                if q is None:
+                    dropped += 1
+                    continue
+                q_seed = q                           # chain: next IK starts nearby
+                stop_qs.append(q)
+
+        # Emit ROLL-MAJOR: one ㄹ pass at each wrist roll, rather than all the
+        # rolls of one stop before moving on. A run stops at target_samples, so
+        # the emit order decides what it actually collects -- stop-major spends
+        # the whole budget on target_samples/len(rolls) viewpoints, while this
+        # covers every stop in the first pass and only then adds rolls. Same
+        # poses, same ㄹ path, walked once per roll.
+        poses = []
+        for roll in rolls:
+            for q in stop_qs:
+                q6 = np.array(q, dtype=float)
+                q6[5] += math.radians(roll)
+                if ak.within_joint_limits(q6, margin_deg=3.0):
+                    poses.append(("joints", [float(v) for v in q6]))
+                else:
+                    dropped += 1
+        stops = len(stop_qs)
 
         if len(poses) < 6:
             self.get_logger().warn(
@@ -508,8 +539,8 @@ class HandeyeCalibrationNode(Node):
                 f"({dropped} dropped); falling back to the pose file")
             return None
         self.get_logger().info(
-            f"ㄹ sweep: {rows} rows x {cols} cols x {len(twists)} twists "
-            f"(+{len(j6_extra)} joint6 rolls) -> "
+            f"ㄹ sweep: {rows} rows x {cols} cols x {len(dists)} standoffs -> "
+            f"{stops} arm configurations x up to {len(rolls)} joint6 rolls = "
             f"{len(poses)} poses aiming at ({aim[0]:.3f}, {aim[1]:.3f}, {aim[2]:.3f})"
             f" ({dropped} dropped)")
         return poses
@@ -1060,9 +1091,16 @@ class HandeyeCalibrationNode(Node):
                                  self.max_t_rms, self.max_r_rms)
 
         if self.enable_outlier and val.status != "SUCCESS" and len(base) > self.min_samples:
+            # Scale the budget with the run. A fixed 3 was fine for a 10-sample
+            # run and far too tight for 30: the sweep takes several shots at one
+            # arm configuration, so a single badly-seen viewpoint contributes
+            # that many outliers AT ONCE. Three removals could not clear one bad
+            # viewpoint, and the run failed on 26 good samples.
+            budget = max(self.max_removals,
+                         int(self.outlier_fraction * len(base)))
             gtc, kb, kc, removed, hist = validator.remove_outliers(
                 base, cam, solve_fn, self.max_t_rms, self.max_r_rms,
-                self.max_removals, max(self.min_samples, 8))
+                budget, max(self.min_samples, 8))
             if removed:
                 self.get_logger().info(
                     f"{method}: removed {len(removed)} outlier sample(s): {removed}")
@@ -1166,6 +1204,25 @@ class HandeyeCalibrationNode(Node):
             method, ts, validation, {})
         cio.save_result(d, path)
         self.get_logger().info(f"saved calibration -> {path} (overwritten)")
+        return path
+
+    def _save_samples_only(self, method):
+        """Dump the raw samples of a FAILED run, without a result file.
+
+        Deliberately timestamped rather than overwriting: failures are compared
+        against each other, and one that clobbered the previous one would hide
+        exactly the pattern you are looking for.
+        """
+        ts = datetime.datetime.now().strftime("%Y%m%dT%H%M%S")
+        path = os.path.join(self.output_dir, f"failed_{method.lower()}_{ts}_samples.yaml")
+        with self._lock:
+            rows = [cio.sample_to_dict(s.pose_index, s.base_T_gripper,
+                                       s.camera_T_target, s.meta)
+                    for s in self._samples]
+        cio.save_samples(rows, path)
+        self.get_logger().info(
+            f"run FAILED -- wrote {len(rows)} raw samples to {path} "
+            f"(no result file: a failed solve is not a calibration to load)")
         return path
 
     def _load_calibration_poses(self):

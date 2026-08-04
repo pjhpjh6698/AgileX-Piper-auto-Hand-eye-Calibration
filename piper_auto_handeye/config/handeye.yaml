@@ -79,8 +79,8 @@
     # HOME pose looks at, aim_distance along its viewing axis -- so the sweep
     # orbits the marker like a hand-held calibration video.
     #   * rotation maximised: different stops aim from different directions,
-    #     and each stop is shot twice, twisted +-serp_twist_deg about the
-    #     aiming axis (pure rotation; the marker stays centred)
+    #     and each stop is shot at several joint-6 rolls (pure rotation; the
+    #     marker stays centred)
     #   * translation minimised: lattice steps are a few cm
     #   * redundancy welcomed: duplicate gate is off (see above)
     # Targets are solved to joints against the arm's own kinematics (IK seeded
@@ -88,18 +88,25 @@
     # back to calibration_poses.yaml when off or too few stops survive.
     auto_generate_poses: true
     serp_rows: 3                      # left-to-right passes
-    serp_cols: 4                      # stops per pass
-    serp_col_step: 0.035              # m between stops along x
+    serp_cols: 5                      # stops per pass
+    serp_col_step: 0.03               # m between stops along x
     serp_row_step: 0.03               # m between passes along -y
-    serp_twist_deg: 25.0              # per-stop twist about the aiming axis
-    serp_orientations_per_stop: 2     # poses per stop (1..3)
-    # Extra poses that differ ONLY by joint-6 roll. Rolling the last joint
-    # spins the camera about its own axis: pure rotation, no translation, and
-    # the marker stays in frame -- the cheapest rotation diversity available.
-    serp_j6_extra_deg: [15.0, -15.0]
+    # Standoff offsets cycled across stops, along the home viewing axis.
+    # Sliding sideways at a fixed radius swings joints 1 and 4 and leaves
+    # 2/3/5 nearly still; changing how far the arm has to reach is what moves
+    # them, and joint variety is what makes the poses genuinely independent.
+    serp_dist_offsets: [0.0, -0.03, 0.03]
+    # Poses taken at each stop, as joint-6 rolls [deg]. 0.0 is the stop itself.
+    # These share joints 1-5 EXACTLY, so they are cheap rotation diversity but
+    # not viewpoint diversity: if the marker is seen badly at a stop, all of
+    # them are bad together, and correlated outliers are what exhaust the
+    # removal budget below and fail a run whose other samples were fine.
+    # Hence the cap -- more shots here buy less than one more stop.
+    serp_roll_deg: [0.0, -25.0, 25.0, -12.0, 12.0]
+    serp_max_rolls_per_stop: 5        # hard cap on poses sharing joints 1-5
     aim_distance: 0.25                # m from home flange to the aim point
     # Aiming from lattice corners tilts the view; the cone must leave room.
-    gen_down_cone_deg: 45.0
+    gen_down_cone_deg: 55.0
 
     # Input topics (from the other nodes)
     marker_topic: marker_detection    # auto_handeye_interfaces/MarkerDetection
@@ -109,7 +116,12 @@
     maximum_translation_rms_m: 0.01
     maximum_rotation_rms_deg: 1.0
     enable_outlier_removal: true
+    # Removal budget = max(max_outlier_removals, fraction * sample_count).
+    # A flat 3 was sized for a 10-sample run; at 30 samples it could not clear
+    # even ONE badly-seen stop (which contributes up to serp_max_rolls_per_stop
+    # correlated outliers), so runs failed on samples that were all good.
     max_outlier_removals: 3
+    outlier_removal_fraction: 0.2
 
     # Output
     output_directory: ""              # "" => ~/.ros/piper_auto_handeye

@@ -192,6 +192,16 @@ Worth knowing:
 
 ## FAQ
 
+Why did a run FAILED when the result looked fine?
+: FAILED means the closed-loop residual passed 5x a threshold — usually rotation
+  RMS, while the translation still looks good. That is the signature of a few
+  bad frames, not a bad calibration: one badly-seen viewpoint is enough. The
+  solver drops outliers automatically, bounded by
+  `max(max_outlier_removals, outlier_removal_fraction * samples)`, so raise
+  `outlier_removal_fraction` if runs keep dying on a handful of frames. A failed
+  run now writes `failed_<method>_<time>_samples.yaml` next to the results with
+  every raw sample, so you can see which ones were off.
+
 Why does the solve fail with "not enough rotation diversity"?
 : The poses are too similar. Hand-eye needs rotation about at least two axes.
   The built-in sweep already does this; if you supplied your own poses, add some

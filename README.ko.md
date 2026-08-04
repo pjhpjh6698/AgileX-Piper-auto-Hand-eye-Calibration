@@ -188,6 +188,15 @@ HANDEYE_GUI_LANG=en rqt --standalone piper_auto_handeye_gui.handeye_gui_plugin.H
 
 ## 자주 묻는 질문
 
+결과는 멀쩡해 보이는데 FAILED가 떴습니다.
+: FAILED는 폐루프 잔차가 임계값의 5배를 넘었다는 뜻이고, 대개 회전 RMS 쪽입니다
+  (이동은 정상으로 보입니다). 이건 캘리브레이션이 나쁜 게 아니라 프레임 몇 개가
+  나쁜 것의 특징이며, 잘못 본 시점 하나면 충분합니다. 솔버가 이상치를 자동으로
+  버리되 `max(max_outlier_removals, outlier_removal_fraction * 샘플수)`로
+  제한되므로, 몇 프레임 때문에 계속 실패하면 `outlier_removal_fraction`을
+  올리세요. 실패한 런은 이제 결과 폴더에 `failed_<방법>_<시각>_samples.yaml`로
+  원본 샘플을 남기므로 어떤 것이 틀어졌는지 볼 수 있습니다.
+
 "회전 다양성 부족"으로 솔브가 실패합니다.
 : 자세들이 너무 비슷합니다. Hand-eye는 최소 두 축에 대한 회전이 필요합니다.
   내장 스위프는 이미 이를 만족하므로, 직접 자세를 넣었다면 다른 축으로 회전하는
